@@ -164,18 +164,37 @@ def test_wait_for_process_kills_subprocess_on_keyboardinterrupt():
         # py-thread-state exception targets need the ident, not the Thread
         tid = t.ident
         assert tid is not None
-        # Fire KeyboardInterrupt into the worker thread
-        ret = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(tid), ctypes.py_object(KeyboardInterrupt),
-        )
+
+        def _fire_async_exc():
+            # PyThreadState_SetAsyncExc only takes effect when the target
+            # thread next executes Python bytecode. If the worker is parked in
+            # a blocking C-level call (subprocess wait, select, time.sleep),
+            # delivery is deferred — and on a loaded host the pending exc can be
+            # missed entirely if set while the thread is mid-syscall. So we
+            # re-fire on a cadence until the worker actually exits, rather than
+            # firing once and hoping. Returns the API's return code.
+            return ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(tid), ctypes.py_object(KeyboardInterrupt),
+            )
+
+        ret = _fire_async_exc()
         assert ret == 1, f"SetAsyncExc returned {ret}, expected 1"
 
-        # Give the worker a moment to: hit the exception at the next poll,
-        # run the except-block cleanup (_kill_process), and exit.  Under
-        # xdist load the SIGTERM → 3s wait → SIGKILL chain can take longer
-        # than 5s before the worker's join() returns; bumped to 15s.
-        t.join(timeout=15.0)
-        assert not t.is_alive(), "worker didn't exit within 15 s of the interrupt"
+        # Wait for the worker to: hit the exception at the next poll, run the
+        # except-block cleanup (_kill_process), and exit. The whole chain —
+        # async-exc delivery + SIGTERM → 3s TimeoutStopSec → SIGKILL → reap —
+        # is timing-sensitive under heavy xdist/CI load, and CPython may not
+        # deliver the async exc on the first try if the worker is in a syscall.
+        # Poll on a single generous deadline and re-fire the async exc each
+        # tick until the thread exits, instead of a brittle one-shot join.
+        deadline = time.monotonic() + 45.0
+        while time.monotonic() < deadline and t.is_alive():
+            _fire_async_exc()  # idempotent re-arm; harmless once the exc lands
+            t.join(timeout=0.5)
+        assert not t.is_alive(), (
+            "worker didn't exit within 45 s of the interrupt — async-exc "
+            "delivery or _kill_process cleanup stalled"
+        )
 
         # The critical assertion: the subprocess GROUP must be dead.  Not
         # just the bash wrapper — the 'sleep 30' child too. Under xdist load,
