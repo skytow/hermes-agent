@@ -213,6 +213,8 @@ class HonchoMemoryProvider(MemoryProvider):
         self._prefetch_lock = threading.Lock()
         self._recall_observations: List[Dict[str, Any]] = []
         self._recall_observations_lock = threading.Lock()
+        self._transition_events: List[Dict[str, Any]] = []
+        self._transition_events_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._sync_thread: Optional[threading.Thread] = None
 
@@ -906,6 +908,8 @@ class HonchoMemoryProvider(MemoryProvider):
     _BACKOFF_MAX = 8
     # Keep recall diagnostics bounded and audit-safe; rows carry ids/counts only.
     _MAX_RECALL_OBSERVATIONS = 50
+    # Keep write/refinement transition diagnostics bounded and audit-safe.
+    _MAX_TRANSITION_EVENTS = 50
 
     def _thread_is_live(self) -> bool:
         """Thread-alive guard that treats threads older than the stale
@@ -1224,6 +1228,18 @@ class HonchoMemoryProvider(MemoryProvider):
         ).hexdigest()[:12]
         return f"honcho:{peer}:card:{index}:{fingerprint}"
 
+    @staticmethod
+    def _audit_fingerprint(value: str) -> str:
+        """Return a compact fingerprint for private provider text/ids."""
+        return hashlib.sha256(str(value or "").strip().encode("utf-8")).hexdigest()[:12]
+
+    def _transition_record_id(self, peer: str, kind: str, value: str) -> str:
+        """Return a stable transition audit id without embedding provider text."""
+        fingerprint = hashlib.sha256(
+            f"{peer}\0{kind}\0{value}".encode("utf-8")
+        ).hexdigest()[:12]
+        return f"honcho:{peer}:{kind}:{fingerprint}"
+
     def _peer_card_quality_records(self, peer: str) -> List[Dict[str, Any]]:
         """Snapshot one peer card as audit records without initializing Honcho."""
         manager = self._manager
@@ -1316,6 +1332,48 @@ class HonchoMemoryProvider(MemoryProvider):
             return []
         with self._recall_observations_lock:
             return [dict(observation) for observation in self._recall_observations]
+
+    def _record_transition_event(
+        self,
+        *,
+        event_type: str,
+        peer: str,
+        route: str,
+        record_id: str | None = None,
+        record_ids: List[str] | None = None,
+        content_value: str = "",
+    ) -> None:
+        """Capture audit-safe Honcho write/refinement transition evidence.
+
+        Rows intentionally contain only stable ids, routes, peers, and optional
+        fingerprints.  Raw conclusion text, delete ids, peer-card facts, query
+        text, and provider response bodies never enter the snapshot rows.
+        """
+        if self._cron_skipped or not self._session_ready():
+            return
+        event: Dict[str, Any] = {
+            "source": "honcho-transition",
+            "event_type": event_type,
+            "route": route,
+            "peer": peer,
+        }
+        if record_ids is not None:
+            event["record_ids"] = [str(rid) for rid in record_ids if rid]
+        elif record_id:
+            event["record_id"] = str(record_id)
+        if content_value:
+            event["content_fingerprint"] = self._audit_fingerprint(content_value)
+        with self._transition_events_lock:
+            self._transition_events.append(event)
+            if len(self._transition_events) > self._MAX_TRANSITION_EVENTS:
+                self._transition_events = self._transition_events[-self._MAX_TRANSITION_EVENTS:]
+
+    def transition_snapshot_events(self) -> List[Dict[str, Any]]:
+        """Return audit-only Honcho write/refinement events collected this session."""
+        if self._cron_skipped or not self._session_ready():
+            return []
+        with self._transition_events_lock:
+            return [dict(event) for event in self._transition_events]
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Record the conversation turn in Honcho (non-blocking).
@@ -1436,6 +1494,17 @@ class HonchoMemoryProvider(MemoryProvider):
                     result = self._manager.set_peer_card(self._session_key, card_update, peer=peer)
                     if result is None:
                         return tool_error("Failed to update peer card.")
+                    record_ids = [
+                        self._quality_record_id(peer, index, str(fact or "").strip())
+                        for index, fact in enumerate(result or [])
+                        if str(fact or "").strip()
+                    ]
+                    self._record_transition_event(
+                        event_type="peer_card_update",
+                        peer=peer,
+                        route="honcho_profile",
+                        record_ids=record_ids,
+                    )
                     return json.dumps({"result": f"Peer card updated ({len(result)} facts).", "card": result})
                 card = self._manager.get_peer_card(self._session_key, peer=peer)
                 if not card:
@@ -1514,10 +1583,24 @@ class HonchoMemoryProvider(MemoryProvider):
                 if has_delete_id:
                     ok = self._manager.delete_conclusion(self._session_key, delete_id, peer=peer)
                     if ok:
+                        self._record_transition_event(
+                            event_type="conclusion_delete",
+                            peer=peer,
+                            route="honcho_conclude",
+                            record_id=self._transition_record_id(peer, "conclusion", delete_id),
+                            content_value=delete_id,
+                        )
                         return json.dumps({"result": f"Conclusion {delete_id} deleted."})
                     return tool_error(f"Failed to delete conclusion {delete_id}.")
                 ok = self._manager.create_conclusion(self._session_key, conclusion, peer=peer)
                 if ok:
+                    self._record_transition_event(
+                        event_type="conclusion_create",
+                        peer=peer,
+                        route="honcho_conclude",
+                        record_id=self._transition_record_id(peer, "conclusion", conclusion),
+                        content_value=conclusion,
+                    )
                     return json.dumps({"result": f"Conclusion saved for {peer}: {conclusion}"})
                 return tool_error("Failed to save conclusion.")
 

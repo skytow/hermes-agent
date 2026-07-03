@@ -514,6 +514,17 @@ class MemoryManager:
 
         return self._collect_provider_snapshots("recall_snapshot_observations")
 
+    def transition_snapshot_events(self) -> List[Dict[str, Any]]:
+        """Return audit-safe memory transition events exposed by providers.
+
+        Providers opt in by implementing ``transition_snapshot_events()``.
+        Rows should carry action/event names, stable record IDs, and optional
+        fingerprints only.  Raw memory text, query text, and provider payloads
+        must stay out of provider event rows.
+        """
+
+        return self._collect_provider_snapshots("transition_snapshot_events")
+
     def build_quality_report(
         self,
         *,
@@ -555,14 +566,16 @@ class MemoryManager:
 
         This is an audit-only bridge for refinement/GC diagnostics.  When
         ``after_records`` is omitted, the manager uses current optional provider
-        ``quality_snapshot_records()`` rows.  No provider mutation is enabled.
+        ``quality_snapshot_records()`` rows.  When ``events`` is omitted, the
+        manager uses current optional provider ``transition_snapshot_events()``
+        rows.  No provider mutation is enabled.
         """
         from agent.memory_quality import build_memory_quality_transition_report
 
         return build_memory_quality_transition_report(
             before_records=before_records,
             after_records=after_records if after_records is not None else self.quality_snapshot_records(),
-            events=events,
+            events=events if events is not None else self.transition_snapshot_events(),
             now=now,
             before_obsidian_synced_at=before_obsidian_synced_at,
             after_obsidian_synced_at=after_obsidian_synced_at,

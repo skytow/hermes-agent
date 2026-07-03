@@ -414,13 +414,18 @@ def _event_metrics(
         counts[event_type] += 1
         content = str(event.get("content") or event.get("text") or event.get("value") or "")
         content_key = _content_key(content)
+        content_fingerprint = event.get("content_fingerprint") or event.get("contentFingerprint")
         diagnostics.append(
             MemoryQualityDiagnostic(
                 reason=f"memory-event-{event_type.replace('_', '-')}",
                 severity="info",
                 record_ids=_event_record_ids(event),
                 canonical_record_id=_event_canonical_record_id(event),
-                content_fingerprint=(_fingerprint(content_key) if content_key else None),
+                content_fingerprint=(
+                    str(content_fingerprint)
+                    if content_fingerprint
+                    else (_fingerprint(content_key) if content_key else None)
+                ),
             )
         )
     return dict(sorted(counts.items())), diagnostics

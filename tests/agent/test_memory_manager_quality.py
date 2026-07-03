@@ -19,6 +19,13 @@ class SnapshotProvider(MemoryProvider):
                 "query": "private recall query should never serialize",
             }
         ]
+        self.transition_events = [
+            {
+                "event_type": "merge",
+                "record_id": "prov:1",
+                "content": "private duplicate fact",
+            }
+        ]
 
     @property
     def name(self) -> str:
@@ -38,6 +45,9 @@ class SnapshotProvider(MemoryProvider):
 
     def recall_snapshot_observations(self):
         return [dict(observation) for observation in self.observations]
+
+    def transition_snapshot_events(self):
+        return [dict(event) for event in self.transition_events]
 
 
 def test_memory_manager_builds_provider_quality_report_without_mutating_provider_records():
@@ -88,25 +98,20 @@ def test_memory_manager_transition_report_compares_previous_snapshot_to_current_
     manager = MemoryManager()
     manager.add_provider(SnapshotProvider())
 
+    provider_events = manager.transition_snapshot_events()
     report = manager.build_transition_report(
         before_records=[
             {"id": "old:1", "tier": "stale", "content": "old private memory", "stale": True},
             {"id": "prov:1", "tier": "candidate", "content": "private duplicate fact"},
         ],
-        events=[
-            {
-                "event_type": "promotion",
-                "record_id": "prov:1",
-                "content": "private duplicate fact",
-            }
-        ],
     )
 
     serialized = report.to_dict()
+    assert provider_events[0]["source_provider"] == "snapshot-test"
     assert serialized["before"]["total_count"] == 2
     assert serialized["after"]["total_count"] == 2
     assert serialized["stale_count_delta"] == -1
     assert serialized["duplicate_count_delta"] == 1
-    assert serialized["event_counts"] == {"promotion": 1}
+    assert serialized["event_counts"] == {"merge": 1}
     assert "old private memory" not in repr(serialized)
     assert "private duplicate fact" not in repr(serialized)
