@@ -225,6 +225,46 @@ def test_memory_quality_transition_report_tracks_gc_event_deltas_without_private
     assert "conflicting private detail" not in repr(serialized)
 
 
+def test_memory_quality_transition_report_canonicalizes_demote_and_keep_events():
+    report = build_memory_quality_transition_report(
+        before_records=[
+            {"id": "working-a", "tier": "working", "content": "private working detail"},
+            {"id": "pinned-b", "pinned": True, "content": "private pinned detail"},
+        ],
+        after_records=[
+            {"id": "working-a", "tier": "candidate", "content": "private working detail"},
+            {"id": "pinned-b", "pinned": True, "content": "private pinned detail"},
+        ],
+        events=[
+            {
+                "action": "demote",
+                "record_id": "working-a",
+                "content": "private working detail",
+            },
+            {
+                "eventType": "retained",
+                "recordId": "pinned-b",
+                "contentFingerprint": "safe-precomputed-fp",
+                "text": "private pinned detail",
+            },
+        ],
+    )
+
+    serialized = report.to_dict()
+
+    assert serialized["tier_count_delta"] == {"candidate": 1, "working": -1}
+    assert serialized["event_counts"] == {"demotion": 1, "keep": 1}
+    assert {diag["reason"] for diag in serialized["event_diagnostics"]} == {
+        "memory-event-demotion",
+        "memory-event-keep",
+    }
+    keep = next(diag for diag in serialized["event_diagnostics"] if diag["reason"] == "memory-event-keep")
+    assert keep["record_ids"] == ["pinned-b"]
+    assert keep["content_fingerprint"] == "safe-precomputed-fp"
+    assert "private working detail" not in repr(serialized)
+    assert "private pinned detail" not in repr(serialized)
+
+
 def test_memory_quality_recall_report_tracks_hits_and_misses_without_query_text():
     report = build_memory_quality_recall_report(
         observations=[

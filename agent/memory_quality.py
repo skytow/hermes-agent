@@ -20,6 +20,17 @@ _TIER_ALIASES = {
     "user": "durable",
 }
 
+_EVENT_ALIASES = {
+    "demote": "demotion",
+    "demoted": "demotion",
+    "demotion": "demotion",
+    "keep": "keep",
+    "kept": "keep",
+    "retain": "keep",
+    "retained": "keep",
+    "retention": "keep",
+}
+
 
 @dataclass(frozen=True)
 class MemoryQualityDiagnostic:
@@ -481,7 +492,7 @@ def _event_canonical_record_id(event: Mapping[str, Any]) -> str | None:
 
 def _normalize_event_type(value: Any) -> str:
     event_type = str(value or "unknown").strip().lower().replace(" ", "_").replace("-", "_")
-    return event_type or "unknown"
+    return _EVENT_ALIASES.get(event_type, event_type or "unknown")
 
 
 def _normalize_tier(value: Any) -> str:
