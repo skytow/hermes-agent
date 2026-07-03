@@ -31,7 +31,7 @@ import re
 import inspect
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from agent.memory_provider import MemoryProvider
 from agent.skill_commands import extract_user_instruction_from_skill_message
@@ -450,6 +450,125 @@ class MemoryManager:
             if p.name == name:
                 return p
         return None
+
+    # -- Audit-safe quality diagnostics --------------------------------------
+
+    @staticmethod
+    def _coerce_snapshot_mapping(value: Any) -> Dict[str, Any]:
+        """Return a mutable audit snapshot mapping without mutating providers."""
+        if isinstance(value, Mapping):
+            return dict(value)
+        try:
+            return dict(value)
+        except (TypeError, ValueError):
+            return {"value": str(value)}
+
+    def _collect_provider_snapshots(self, hook_name: str) -> List[Dict[str, Any]]:
+        """Collect optional provider snapshot rows from audit-only hooks."""
+        snapshots: List[Dict[str, Any]] = []
+        for provider in self._providers:
+            hook = getattr(provider, hook_name, None)
+            if not callable(hook):
+                continue
+            try:
+                raw_rows = hook() or []
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' %s() failed (non-fatal): %s",
+                    provider.name,
+                    hook_name,
+                    e,
+                )
+                continue
+            if isinstance(raw_rows, Mapping):
+                rows = [raw_rows]
+            elif isinstance(raw_rows, (list, tuple, set)):
+                rows = list(raw_rows)
+            else:
+                rows = [raw_rows]
+            for row in rows:
+                snapshot = self._coerce_snapshot_mapping(row)
+                snapshot.setdefault("source_provider", provider.name)
+                snapshots.append(snapshot)
+        return snapshots
+
+    def quality_snapshot_records(self) -> List[Dict[str, Any]]:
+        """Return audit-safe memory-quality records exposed by providers.
+
+        Providers opt in by implementing ``quality_snapshot_records()``.  The
+        manager copies every row and adds ``source_provider`` when absent, but
+        never reads from disk, writes to a provider, or mutates provider-owned
+        records.  Callers can feed the returned rows to ``build_quality_report``
+        for aggregate diagnostics.
+        """
+
+        return self._collect_provider_snapshots("quality_snapshot_records")
+
+    def recall_snapshot_observations(self) -> List[Dict[str, Any]]:
+        """Return audit-safe recall observations exposed by providers.
+
+        Providers opt in by implementing ``recall_snapshot_observations()``.
+        Rows should contain expected/retrieved record IDs only; query text, if a
+        provider includes it, is ignored by the recall report builder.
+        """
+
+        return self._collect_provider_snapshots("recall_snapshot_observations")
+
+    def build_quality_report(
+        self,
+        *,
+        now: Any = None,
+        obsidian_synced_at: Any = None,
+        queued_write_count: int = 0,
+    ):
+        """Build an aggregate audit-safe quality report for provider snapshots."""
+        from agent.memory_quality import build_memory_quality_report
+
+        return build_memory_quality_report(
+            self.quality_snapshot_records(),
+            now=now,
+            obsidian_synced_at=obsidian_synced_at,
+            queued_write_count=queued_write_count,
+        )
+
+    def build_recall_report(self):
+        """Build an aggregate recall hit/miss report for provider snapshots."""
+        from agent.memory_quality import build_memory_quality_recall_report
+
+        return build_memory_quality_recall_report(
+            observations=self.recall_snapshot_observations()
+        )
+
+    def build_transition_report(
+        self,
+        *,
+        before_records: Iterable[Mapping[str, Any]],
+        after_records: Optional[Iterable[Mapping[str, Any]]] = None,
+        events: Optional[Iterable[Mapping[str, Any]]] = None,
+        now: Any = None,
+        before_obsidian_synced_at: Any = None,
+        after_obsidian_synced_at: Any = None,
+        before_queued_write_count: int = 0,
+        after_queued_write_count: int = 0,
+    ):
+        """Compare a prior snapshot to current provider quality records.
+
+        This is an audit-only bridge for refinement/GC diagnostics.  When
+        ``after_records`` is omitted, the manager uses current optional provider
+        ``quality_snapshot_records()`` rows.  No provider mutation is enabled.
+        """
+        from agent.memory_quality import build_memory_quality_transition_report
+
+        return build_memory_quality_transition_report(
+            before_records=before_records,
+            after_records=after_records if after_records is not None else self.quality_snapshot_records(),
+            events=events,
+            now=now,
+            before_obsidian_synced_at=before_obsidian_synced_at,
+            after_obsidian_synced_at=after_obsidian_synced_at,
+            before_queued_write_count=before_queued_write_count,
+            after_queued_write_count=after_queued_write_count,
+        )
 
     # -- System prompt -------------------------------------------------------
 
