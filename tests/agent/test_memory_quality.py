@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from agent.memory_quality import build_memory_quality_report
+from tools.memory_tool import MemoryStore
 
 
 def test_memory_quality_report_counts_tiers_and_quality_signals():
@@ -92,3 +93,30 @@ def test_memory_quality_diagnostics_explain_actions_without_private_content():
     assert "same sensitive fact" not in repr(serialized)
     assert "old private fact" not in repr(serialized)
     assert "conflicting private fact" not in repr(serialized)
+
+
+def test_memory_store_builds_audit_safe_quality_report_from_live_snapshot():
+    store = MemoryStore()
+    store.memory_entries = ["Duplicate private fact", " duplicate private fact "]
+    store.user_entries = ["User durable preference"]
+
+    records = store.quality_snapshot_records()
+    report = store.build_quality_report(
+        now=datetime(2026, 7, 3, 0, 30, tzinfo=timezone.utc),
+        obsidian_synced_at="2026-07-03T00:00:00Z",
+        queued_write_count=2,
+    )
+
+    assert [record["id"] for record in records] == ["memory:0", "memory:1", "user:0"]
+    assert [record["tier"] for record in records] == ["durable", "durable", "durable"]
+    assert store.memory_entries == ["Duplicate private fact", " duplicate private fact "]
+    assert store.user_entries == ["User durable preference"]
+
+    serialized = report.to_dict()
+    assert serialized["total_count"] == 3
+    assert serialized["tier_counts"] == {"durable": 3}
+    assert serialized["duplicate_count"] == 1
+    assert serialized["queued_write_count"] == 2
+    assert serialized["obsidian_sync_lag_seconds"] == 1800
+    assert "Duplicate private fact" not in repr(serialized)
+    assert "User durable preference" not in repr(serialized)

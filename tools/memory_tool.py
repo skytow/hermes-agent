@@ -280,6 +280,44 @@ class MemoryStore:
             return self.user_entries
         return self.memory_entries
 
+    def quality_snapshot_records(self) -> List[Dict[str, Any]]:
+        """Return audit-only records for memory quality reporting.
+
+        The records are snapshots of the in-memory entry lists and are intended
+        for pure diagnostics.  Calling this method does not read from disk,
+        write to disk, merge, demote, archive, delete, or otherwise mutate
+        memory state.
+        """
+        records: List[Dict[str, Any]] = []
+        for target, entries in (("memory", list(self.memory_entries)), ("user", list(self.user_entries))):
+            for index, content in enumerate(entries):
+                records.append(
+                    {
+                        "id": f"{target}:{index}",
+                        "tier": "durable",
+                        "target": target,
+                        "content": content,
+                        "source": "builtin-memory",
+                    }
+                )
+        return records
+
+    def build_quality_report(self, *, now=None, obsidian_synced_at=None, queued_write_count: int = 0):
+        """Build an audit-safe quality report from the current live snapshot.
+
+        This is a diagnostic/reporting seam only.  The returned report uses
+        ``agent.memory_quality`` to hash/aggregate private content without
+        exposing raw memory text in diagnostics.
+        """
+        from agent.memory_quality import build_memory_quality_report
+
+        return build_memory_quality_report(
+            self.quality_snapshot_records(),
+            now=now,
+            obsidian_synced_at=obsidian_synced_at,
+            queued_write_count=queued_write_count,
+        )
+
     def _set_entries(self, target: str, entries: List[str]):
         if target == "user":
             self.user_entries = entries
