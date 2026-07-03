@@ -15,6 +15,7 @@ Config: Uses the existing Honcho config chain:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -1210,6 +1211,51 @@ class HonchoMemoryProvider(MemoryProvider):
                 "honcho_search to query raw conversation excerpts."
             ),
         }
+
+    def _quality_record_id(self, peer: str, index: int, content: str) -> str:
+        """Return a stable audit id for a Honcho card fact without leaking text."""
+        fingerprint = hashlib.sha256(
+            f"{peer}\0{content}".encode("utf-8")
+        ).hexdigest()[:12]
+        return f"honcho:{peer}:card:{index}:{fingerprint}"
+
+    def quality_snapshot_records(self) -> List[Dict[str, Any]]:
+        """Return audit-only Honcho peer-card records for memory quality reports.
+
+        This hook snapshots already-initialized Honcho provider state.  It does
+        not initialize a session, write to Honcho, mutate local caches, or expose
+        raw fact text in record identifiers.  The report builder consumes the
+        private fact text only to compute aggregate counts and fingerprints, and
+        never serializes the text itself.
+        """
+        if self._cron_skipped or not self._session_ready():
+            return []
+        manager = self._manager
+        if manager is None:
+            return []
+
+        records: List[Dict[str, Any]] = []
+        for peer in ("user", "ai"):
+            try:
+                facts = manager.get_peer_card(self._session_key, peer=peer)
+            except Exception as exc:
+                logger.debug("Honcho quality snapshot peer card fetch failed for %s: %s", peer, exc)
+                continue
+            for index, fact in enumerate(facts or []):
+                content = str(fact or "").strip()
+                if not content:
+                    continue
+                records.append(
+                    {
+                        "id": self._quality_record_id(peer, index, content),
+                        "tier": "durable",
+                        "content": content,
+                        "source": "honcho-peer-card",
+                        "peer": peer,
+                        "confidence": 1.0,
+                    }
+                )
+        return records
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Record the conversation turn in Honcho (non-blocking).
