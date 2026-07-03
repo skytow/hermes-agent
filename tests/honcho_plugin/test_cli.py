@@ -1,6 +1,7 @@
 """Tests for plugins/memory/honcho/cli.py."""
 
 from types import SimpleNamespace
+import argparse
 import json
 
 
@@ -180,6 +181,59 @@ class TestCmdSetupLocalJwt:
 
 
 class TestCmdStatus:
+    def test_status_parser_accepts_quality_flags(self):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        parser = argparse.ArgumentParser(prog="hermes honcho")
+        honcho_cli.register_cli(parser)
+
+        args = parser.parse_args(["status", "--quality", "--quality-output", "/tmp/honcho-quality.json"])
+
+        assert args.honcho_command == "status"
+        assert args.quality is True
+        assert args.quality_output == "/tmp/honcho-quality.json"
+
+    def test_status_quality_payload_summarizes_initialized_peer_cards_without_raw_text(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        calls = []
+
+        class FakeConfig:
+            def resolve_session_name(self):
+                return "telegram:8703694071"
+
+        class FakeManager:
+            def __init__(self, honcho, config):
+                self.honcho = honcho
+                self.config = config
+
+            def get_or_create(self, session_key):
+                calls.append(("get_or_create", session_key))
+
+            def get_peer_card(self, session_key, peer="user"):
+                calls.append(("get_peer_card", session_key, peer))
+                if peer == "user":
+                    return [
+                        "Private buyer pickup preference must stay out of status payloads",
+                        " Private buyer pickup preference must stay out of status payloads ",
+                    ]
+                if peer == "ai":
+                    return ["JR keeps live memory mutations disabled during audits"]
+                return []
+
+        monkeypatch.setattr("plugins.memory.honcho.session.HonchoSessionManager", FakeManager)
+
+        payload = honcho_cli._build_status_quality_payload(FakeConfig(), object())
+
+        assert calls[0] == ("get_or_create", "telegram:8703694071")
+        assert payload["session_key"] == "telegram:8703694071"
+        assert payload["available"] is True
+        assert payload["quality_report"]["total_count"] == 3
+        assert payload["quality_report"]["duplicate_count"] == 1
+        assert payload["recall_report"]["observation_count"] == 0
+        assert "Private buyer pickup preference" not in repr(payload)
+        assert "JR keeps live memory mutations" not in repr(payload)
+
     def test_reports_connection_failure_when_session_setup_fails(self, monkeypatch, capsys, tmp_path):
         import plugins.memory.honcho.cli as honcho_cli
 

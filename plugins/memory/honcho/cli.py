@@ -1020,6 +1020,8 @@ def _all_profile_host_configs() -> list[tuple[str, str, dict]]:
 def cmd_status(args) -> None:
     """Show current Honcho config and connection status."""
     show_all = getattr(args, "all", False)
+    include_quality = bool(getattr(args, "quality", False))
+    quality_output = getattr(args, "quality_output", None)
 
     if show_all:
         _cmd_status_all()
@@ -1116,6 +1118,13 @@ def cmd_status(args) -> None:
         try:
             client = get_honcho_client(hcfg)
             _show_peer_cards(hcfg, client)
+            if include_quality or quality_output:
+                quality_payload = _build_status_quality_payload(hcfg, client)
+                if include_quality:
+                    _print_status_quality_payload(quality_payload)
+                if quality_output:
+                    written = _write_status_quality_payload(quality_output, quality_payload)
+                    print(f"\n  Wrote audit-safe Honcho quality JSON: {written}")
             print("OK")
         except Exception as e:
             print(f"FAILED ({e})\n")
@@ -1161,6 +1170,60 @@ def _show_peer_cards(hcfg, client) -> None:
         print()
     except Exception as e:
         print(f"\n  Peer data unavailable: {e}\n")
+
+
+def _build_status_quality_payload(hcfg, client) -> dict:
+    """Build audit-safe Honcho memory-quality payload for the active status session.
+
+    Unlike ``hermes memory status --provider-quality``, this runs inside the
+    Honcho status command after a client/session is already being inspected. It
+    creates no memory writes and only snapshots peer-card facts into aggregate
+    quality/recall counters; raw fact text is consumed by the report builder but
+    never serialized in the returned payload.
+    """
+    from agent.memory_manager import MemoryManager
+    from plugins.memory.honcho import HonchoMemoryProvider
+    from plugins.memory.honcho.session import HonchoSessionManager
+
+    mgr = HonchoSessionManager(honcho=client, config=hcfg)
+    session_key = hcfg.resolve_session_name()
+    mgr.get_or_create(session_key)
+
+    provider = HonchoMemoryProvider()
+    provider._manager = mgr
+    provider._session_key = session_key
+    provider._session_initialized = True
+
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    return {
+        "provider": "honcho",
+        "available": True,
+        "session_key": session_key,
+        "quality_report": manager.build_quality_report().to_dict(),
+        "recall_report": manager.build_recall_report().to_dict(),
+    }
+
+
+def _print_status_quality_payload(payload: dict) -> None:
+    quality = payload.get("quality_report") or {}
+    recall = payload.get("recall_report") or {}
+    print("\n  Memory quality snapshot (audit-safe):")
+    print(f"    session:              {payload.get('session_key') or '(unknown)'}")
+    print(f"    peer-card records:    {quality.get('total_count', 0)}")
+    print(f"    tier counts:          {quality.get('tier_counts', {})}")
+    print(f"    duplicates:           {quality.get('duplicate_count', 0)}")
+    print(f"    stale:                {quality.get('stale_count', 0)}")
+    print(f"    unresolved conflicts: {quality.get('unresolved_conflict_count', 0)}")
+    print(f"    recall observations:  {recall.get('observation_count', 0)}")
+    print(f"    recall hits/misses:   {recall.get('hit_count', 0)}/{recall.get('miss_count', 0)}")
+
+
+def _write_status_quality_payload(path_value: str, payload: dict) -> Path:
+    output_path = Path(path_value).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return output_path
 
 
 def _cmd_status_all() -> None:
@@ -1791,6 +1854,14 @@ def register_cli(subparser) -> None:
     )
     status_parser.add_argument(
         "--all", action="store_true", help="Show config overview across all profiles",
+    )
+    status_parser.add_argument(
+        "--quality", action="store_true",
+        help="Show audit-safe peer-card memory quality counters for the active Honcho session",
+    )
+    status_parser.add_argument(
+        "--quality-output", metavar="PATH",
+        help="Write audit-safe Honcho memory quality JSON to PATH",
     )
 
     subs.add_parser("peers", help="Show peer identities across all profiles")
