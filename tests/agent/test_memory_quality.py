@@ -99,6 +99,41 @@ def test_memory_quality_diagnostics_explain_actions_without_private_content():
     assert "conflicting private fact" not in repr(serialized)
 
 
+def test_memory_quality_report_counts_required_tier_aliases_from_state_flags():
+    report = build_memory_quality_report(
+        [
+            {"id": "ephemeral", "state": "ephemeral", "content": "private ephemeral note"},
+            {"id": "working", "target": "working", "content": "private working note"},
+            {"id": "candidate", "tier": "candidate", "content": "private candidate note"},
+            {"id": "durable", "tier": "memory", "content": "private durable note"},
+            {"id": "pinned", "pinned": True, "content": "private pinned note"},
+            {"id": "stale", "stale": True, "content": "private stale note"},
+            {"id": "archived", "archived": True, "content": "private archived note"},
+            {"id": "conflicted", "conflict": True, "content": "private conflict note"},
+            {"id": "deleted", "deleted": True, "content": "private deleted note"},
+        ]
+    )
+
+    serialized = report.to_dict()
+
+    assert serialized["tier_counts"] == {
+        "archived": 1,
+        "candidate": 1,
+        "conflicted": 1,
+        "deleted": 1,
+        "durable": 1,
+        "ephemeral": 1,
+        "pinned": 1,
+        "stale": 1,
+        "working": 1,
+    }
+    assert serialized["stale_count"] == 1
+    assert serialized["unresolved_conflict_count"] == 1
+    assert "private pinned note" not in repr(serialized)
+    assert "private conflict note" not in repr(serialized)
+    assert "private deleted note" not in repr(serialized)
+
+
 def test_memory_store_builds_audit_safe_quality_report_from_live_snapshot():
     store = MemoryStore()
     store.memory_entries = ["Duplicate private fact", " duplicate private fact "]

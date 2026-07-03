@@ -339,20 +339,48 @@ def build_memory_quality_recall_report(
 
 def _normalize_record(record: Mapping[str, Any], index: int) -> dict[str, Any]:
     record_id = str(record.get("id") or record.get("key") or f"record-{index}")
-    tier = _normalize_tier(record.get("tier") or record.get("state") or record.get("target"))
+    conflict_status = str(record.get("conflict_status") or record.get("conflictStatus") or "").lower()
+    tier = _record_tier(record, conflict_status)
     content = str(record.get("content") or record.get("text") or record.get("value") or "")
     confidence = _parse_confidence(record.get("confidence"))
-    conflict_status = str(record.get("conflict_status") or record.get("conflictStatus") or "").lower()
     return {
         "id": record_id,
         "tier": tier,
         "content_key": _content_key(content),
         "confidence": confidence,
-        "is_stale": bool(record.get("stale")) or tier == "stale",
-        "has_unresolved_conflict": bool(record.get("conflict"))
+        "is_stale": _truthy(record.get("stale")) or tier == "stale",
+        "has_unresolved_conflict": _truthy(record.get("conflict"))
         or tier in {"conflicted", "conflict"}
         or conflict_status in {"unresolved", "conflicted", "conflict", "unresolved_conflict"},
     }
+
+
+def _record_tier(record: Mapping[str, Any], conflict_status: str) -> str:
+    explicit_tier = record.get("tier") or record.get("state") or record.get("target")
+    if explicit_tier is not None and str(explicit_tier).strip():
+        return _normalize_tier(explicit_tier)
+    if _truthy(record.get("deleted") or record.get("is_deleted") or record.get("isDeleted")):
+        return "deleted"
+    if _truthy(record.get("archived") or record.get("is_archived") or record.get("isArchived")):
+        return "archived"
+    if _truthy(record.get("conflict")) or conflict_status in {
+        "unresolved",
+        "conflicted",
+        "conflict",
+        "unresolved_conflict",
+    }:
+        return "conflicted"
+    if _truthy(record.get("stale") or record.get("is_stale") or record.get("isStale")):
+        return "stale"
+    if _truthy(record.get("pinned") or record.get("is_pinned") or record.get("isPinned")):
+        return "pinned"
+    return _normalize_tier(explicit_tier)
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "none", "null"}
+    return bool(value)
 
 
 def _observation_ids(
