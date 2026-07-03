@@ -211,6 +211,8 @@ class HonchoMemoryProvider(MemoryProvider):
         self._session_key = ""
         self._prefetch_result = ""
         self._prefetch_lock = threading.Lock()
+        self._recall_observations: List[Dict[str, Any]] = []
+        self._recall_observations_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._sync_thread: Optional[threading.Thread] = None
 
@@ -775,6 +777,7 @@ class HonchoMemoryProvider(MemoryProvider):
 
         # ----- Port #3265: token budget enforcement -----
         result = self._truncate_to_budget(result)
+        self._record_recall_observation(route="prefetch", peer="user", result=result)
 
         return result
 
@@ -901,6 +904,8 @@ class HonchoMemoryProvider(MemoryProvider):
     # Cap on the empty-streak backoff so a persistently silent backend
     # eventually settles on a ceiling instead of unbounded widening.
     _BACKOFF_MAX = 8
+    # Keep recall diagnostics bounded and audit-safe; rows carry ids/counts only.
+    _MAX_RECALL_OBSERVATIONS = 50
 
     def _thread_is_live(self) -> bool:
         """Thread-alive guard that treats threads older than the stale
@@ -1219,6 +1224,34 @@ class HonchoMemoryProvider(MemoryProvider):
         ).hexdigest()[:12]
         return f"honcho:{peer}:card:{index}:{fingerprint}"
 
+    def _peer_card_quality_records(self, peer: str) -> List[Dict[str, Any]]:
+        """Snapshot one peer card as audit records without initializing Honcho."""
+        manager = self._manager
+        if manager is None:
+            return []
+        try:
+            facts = manager.get_peer_card(self._session_key, peer=peer)
+        except Exception as exc:
+            logger.debug("Honcho quality snapshot peer card fetch failed for %s: %s", peer, exc)
+            return []
+
+        records: List[Dict[str, Any]] = []
+        for index, fact in enumerate(facts or []):
+            content = str(fact or "").strip()
+            if not content:
+                continue
+            records.append(
+                {
+                    "id": self._quality_record_id(peer, index, content),
+                    "tier": "durable",
+                    "content": content,
+                    "source": "honcho-peer-card",
+                    "peer": peer,
+                    "confidence": 1.0,
+                }
+            )
+        return records
+
     def quality_snapshot_records(self) -> List[Dict[str, Any]]:
         """Return audit-only Honcho peer-card records for memory quality reports.
 
@@ -1230,32 +1263,59 @@ class HonchoMemoryProvider(MemoryProvider):
         """
         if self._cron_skipped or not self._session_ready():
             return []
-        manager = self._manager
-        if manager is None:
-            return []
 
         records: List[Dict[str, Any]] = []
         for peer in ("user", "ai"):
-            try:
-                facts = manager.get_peer_card(self._session_key, peer=peer)
-            except Exception as exc:
-                logger.debug("Honcho quality snapshot peer card fetch failed for %s: %s", peer, exc)
-                continue
-            for index, fact in enumerate(facts or []):
-                content = str(fact or "").strip()
-                if not content:
-                    continue
-                records.append(
-                    {
-                        "id": self._quality_record_id(peer, index, content),
-                        "tier": "durable",
-                        "content": content,
-                        "source": "honcho-peer-card",
-                        "peer": peer,
-                        "confidence": 1.0,
-                    }
-                )
+            records.extend(self._peer_card_quality_records(peer))
         return records
+
+    @staticmethod
+    def _record_content_visible(record: Dict[str, Any], result_text: str) -> bool:
+        content = str(record.get("content") or "").strip()
+        if not content or not result_text:
+            return False
+        return content.casefold() in result_text.casefold()
+
+    def _record_recall_observation(self, *, route: str, peer: str, result: Any) -> None:
+        """Capture audit-safe recall hit/miss evidence for Honcho retrieval calls.
+
+        Observations intentionally store only stable record ids, route metadata,
+        and counts.  Query text, result text, and raw peer-card facts never enter
+        the persisted snapshot rows.
+        """
+        if self._cron_skipped or not self._session_ready():
+            return
+        expected_records = self._peer_card_quality_records(peer)
+        if not expected_records:
+            return
+        result_text = str(result or "")
+        retrieved_ids = [
+            str(record["id"])
+            for record in expected_records
+            if self._record_content_visible(record, result_text)
+        ]
+        expected_ids = [str(record["id"]) for record in expected_records]
+        observation = {
+            "source": "honcho-recall",
+            "route": route,
+            "peer": peer,
+            "expected_record_ids": expected_ids,
+            "retrieved_record_ids": retrieved_ids,
+            "expected_count": len(expected_ids),
+            "retrieved_count": len(retrieved_ids),
+            "result_present": bool(result_text.strip()),
+        }
+        with self._recall_observations_lock:
+            self._recall_observations.append(observation)
+            if len(self._recall_observations) > self._MAX_RECALL_OBSERVATIONS:
+                self._recall_observations = self._recall_observations[-self._MAX_RECALL_OBSERVATIONS:]
+
+    def recall_snapshot_observations(self) -> List[Dict[str, Any]]:
+        """Return audit-only Honcho recall observations collected this session."""
+        if self._cron_skipped or not self._session_ready():
+            return []
+        with self._recall_observations_lock:
+            return [dict(observation) for observation in self._recall_observations]
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Record the conversation turn in Honcho (non-blocking).
@@ -1391,6 +1451,9 @@ class HonchoMemoryProvider(MemoryProvider):
                 result = self._manager.search_context(
                     self._session_key, query, max_tokens=max_tokens, peer=peer
                 )
+                self._record_recall_observation(
+                    route="honcho_search", peer=peer, result=result
+                )
                 if not result:
                     return json.dumps({"result": "No relevant context found."})
                 return json.dumps({"result": result})
@@ -1414,6 +1477,9 @@ class HonchoMemoryProvider(MemoryProvider):
                 peer = args.get("peer", "user")
                 ctx = self._manager.get_session_context(self._session_key, peer=peer)
                 if not ctx:
+                    self._record_recall_observation(
+                        route="honcho_context", peer=peer, result=""
+                    )
                     return json.dumps({"result": "No context available yet."})
                 parts = []
                 if ctx.get("summary"):
@@ -1429,7 +1495,11 @@ class HonchoMemoryProvider(MemoryProvider):
                         for m in msgs[-5:]  # last 5 for brevity
                     )
                     parts.append(f"## Recent messages\n{msg_str}")
-                return json.dumps({"result": "\n\n".join(parts) or "No context available."})
+                context_result = "\n\n".join(parts) or "No context available."
+                self._record_recall_observation(
+                    route="honcho_context", peer=peer, result=context_result
+                )
+                return json.dumps({"result": context_result})
 
             elif tool_name == "honcho_conclude":
                 delete_id = (args.get("delete_id") or "").strip()

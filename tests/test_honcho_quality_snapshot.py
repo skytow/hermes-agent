@@ -21,6 +21,32 @@ class _FakeHonchoManager:
         return []
 
 
+class _FakeRecallManager(_FakeHonchoManager):
+    def get_peer_card(self, session_key: str, peer: str = "user") -> list[str]:
+        self.calls.append((session_key, peer))
+        if peer == "user":
+            return [
+                "Chris wants status reports backed by commands",
+                "Chris prioritizes direct revenue before cleanup",
+            ]
+        return []
+
+    def search_context(
+        self,
+        session_key: str,
+        query: str,
+        max_tokens: int = 800,
+        peer: str = "user",
+    ) -> str:
+        return "Relevant context: Chris wants status reports backed by commands."
+
+    def get_session_context(self, session_key: str, peer: str = "user") -> dict[str, Any]:
+        return {
+            "card": "Chris prioritizes direct revenue before cleanup",
+            "summary": "Private session summary should not become recall evidence text",
+        }
+
+
 def _ready_provider(manager: _FakeHonchoManager | None = None) -> HonchoMemoryProvider:
     provider = HonchoMemoryProvider()
     cast(Any, provider)._manager = manager or _FakeHonchoManager()
@@ -57,3 +83,40 @@ def test_honcho_provider_quality_snapshot_is_empty_before_session_ready():
     provider = HonchoMemoryProvider()
 
     assert provider.quality_snapshot_records() == []
+
+
+def test_honcho_provider_recall_snapshot_tracks_search_and_context_hits_without_raw_text():
+    provider = _ready_provider(_FakeRecallManager())
+
+    search_payload = provider.handle_tool_call(
+        "honcho_search",
+        {"query": "private customer status report query", "peer": "user"},
+    )
+    context_payload = provider.handle_tool_call("honcho_context", {"peer": "user"})
+
+    assert "Chris wants status reports" in search_payload
+    assert "direct revenue" in context_payload
+
+    observations = provider.recall_snapshot_observations()
+    assert [observation["route"] for observation in observations] == [
+        "honcho_search",
+        "honcho_context",
+    ]
+    assert all("query" not in observation for observation in observations)
+    assert all("private customer" not in repr(observation) for observation in observations)
+    assert observations[0]["expected_record_ids"]
+    assert observations[0]["retrieved_record_ids"] == [observations[0]["expected_record_ids"][0]]
+    assert observations[1]["retrieved_record_ids"] == [observations[1]["expected_record_ids"][1]]
+
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    report = manager.build_recall_report().to_dict()
+
+    assert report["observation_count"] == 2
+    assert report["expected_record_count"] == 4
+    assert report["retrieved_record_count"] == 2
+    assert report["hit_count"] == 2
+    assert report["miss_count"] == 2
+    assert "private customer status report query" not in repr(report)
+    assert "Chris wants status reports" not in repr(report)
+    assert "direct revenue" not in repr(report)
