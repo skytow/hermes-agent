@@ -104,6 +104,34 @@ class MemoryQualityTransitionReport:
         }
 
 
+@dataclass(frozen=True)
+class MemoryQualityRecallReport:
+    """Audit-safe recall/precision evidence for memory retrieval snapshots."""
+
+    observation_count: int
+    expected_record_count: int
+    retrieved_record_count: int
+    hit_count: int
+    miss_count: int
+    unexpected_retrieval_count: int
+    recall_rate: float
+    precision_rate: float
+    diagnostics: list[MemoryQualityDiagnostic] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "observation_count": self.observation_count,
+            "expected_record_count": self.expected_record_count,
+            "retrieved_record_count": self.retrieved_record_count,
+            "hit_count": self.hit_count,
+            "miss_count": self.miss_count,
+            "unexpected_retrieval_count": self.unexpected_retrieval_count,
+            "recall_rate": self.recall_rate,
+            "precision_rate": self.precision_rate,
+            "diagnostics": [diagnostic.to_dict() for diagnostic in self.diagnostics],
+        }
+
+
 def build_memory_quality_report(
     records: Iterable[Mapping[str, Any]],
     *,
@@ -231,6 +259,84 @@ def build_memory_quality_transition_report(
     )
 
 
+def build_memory_quality_recall_report(
+    *,
+    observations: Iterable[Mapping[str, Any]],
+) -> MemoryQualityRecallReport:
+    """Summarize memory retrieval hit/miss evidence without query text.
+
+    ``observations`` should be already-snapshotted retrieval attempts.  Each
+    observation can provide ``expected_record_ids``/``expectedRecordIds`` or a
+    singular ``expected_record_id`` plus ``retrieved_record_ids``/aliases.  The
+    helper only reports ids, counts, and reason codes; it intentionally ignores
+    query/body text so recall diagnostics can be logged without leaking private
+    prompts or memory content.
+    """
+
+    observation_count = 0
+    expected_record_count = 0
+    retrieved_record_count = 0
+    hit_count = 0
+    missing_ids: list[str] = []
+    unexpected_ids: list[str] = []
+
+    for observation in observations:
+        observation_count += 1
+        expected_ids = _observation_ids(
+            observation,
+            plural_keys=("expected_record_ids", "expectedRecordIds", "expected_ids", "expectedIds"),
+            singular_keys=("expected_record_id", "expectedRecordId", "expected_id", "expectedId"),
+        )
+        retrieved_ids = _observation_ids(
+            observation,
+            plural_keys=("retrieved_record_ids", "retrievedRecordIds", "retrieved_ids", "retrievedIds"),
+            singular_keys=("retrieved_record_id", "retrievedRecordId", "retrieved_id", "retrievedId"),
+        )
+        expected_set = set(expected_ids)
+        retrieved_set = set(retrieved_ids)
+        hits = expected_set & retrieved_set
+        misses = [record_id for record_id in expected_ids if record_id not in hits]
+        unexpected = [record_id for record_id in retrieved_ids if record_id not in expected_set]
+
+        expected_record_count += len(expected_ids)
+        retrieved_record_count += len(retrieved_ids)
+        hit_count += len(hits)
+        missing_ids.extend(misses)
+        unexpected_ids.extend(unexpected)
+
+    miss_count = len(missing_ids)
+    unexpected_retrieval_count = len(unexpected_ids)
+    diagnostics: list[MemoryQualityDiagnostic] = []
+    if missing_ids:
+        diagnostics.append(
+            MemoryQualityDiagnostic(
+                reason="memory-recall-miss",
+                severity="warning",
+                record_ids=_dedupe_strings(missing_ids),
+            )
+        )
+    if unexpected_ids:
+        diagnostics.append(
+            MemoryQualityDiagnostic(
+                reason="memory-recall-unexpected-retrieval",
+                severity="info",
+                record_ids=_dedupe_strings(unexpected_ids),
+            )
+        )
+
+    return MemoryQualityRecallReport(
+        observation_count=observation_count,
+        expected_record_count=expected_record_count,
+        retrieved_record_count=retrieved_record_count,
+        hit_count=hit_count,
+        miss_count=miss_count,
+        unexpected_retrieval_count=unexpected_retrieval_count,
+        recall_rate=_rate(hit_count, expected_record_count) if expected_record_count else 1.0,
+        precision_rate=_rate(hit_count, retrieved_record_count) if retrieved_record_count else 1.0,
+        diagnostics=diagnostics,
+    )
+
+
 def _normalize_record(record: Mapping[str, Any], index: int) -> dict[str, Any]:
     record_id = str(record.get("id") or record.get("key") or f"record-{index}")
     tier = _normalize_tier(record.get("tier") or record.get("state") or record.get("target"))
@@ -247,6 +353,44 @@ def _normalize_record(record: Mapping[str, Any], index: int) -> dict[str, Any]:
         or tier in {"conflicted", "conflict"}
         or conflict_status in {"unresolved", "conflicted", "conflict", "unresolved_conflict"},
     }
+
+
+def _observation_ids(
+    observation: Mapping[str, Any],
+    *,
+    plural_keys: tuple[str, ...],
+    singular_keys: tuple[str, ...],
+) -> list[str]:
+    for key in plural_keys:
+        if key in observation:
+            return _dedupe_strings(_coerce_id_list(observation.get(key)))
+    for key in singular_keys:
+        if key in observation:
+            value = observation.get(key)
+            return [str(value)] if value is not None and str(value) else []
+    return []
+
+
+def _coerce_id_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        return [str(value)] if str(value) else []
+    try:
+        return [str(item) for item in value if item is not None and str(item)]
+    except TypeError:
+        return [str(value)] if str(value) else []
+
+
+def _dedupe_strings(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
 
 
 def _count_delta(before: Mapping[str, int], after: Mapping[str, int]) -> dict[str, int]:

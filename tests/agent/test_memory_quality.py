@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from agent.memory_quality import build_memory_quality_report, build_memory_quality_transition_report
+from agent.memory_quality import (
+    build_memory_quality_recall_report,
+    build_memory_quality_report,
+    build_memory_quality_transition_report,
+)
 from tools.memory_tool import MemoryStore
 
 
@@ -184,3 +188,49 @@ def test_memory_quality_transition_report_tracks_gc_event_deltas_without_private
     assert "sensitive duplicate fact" not in repr(serialized)
     assert "old private detail" not in repr(serialized)
     assert "conflicting private detail" not in repr(serialized)
+
+
+def test_memory_quality_recall_report_tracks_hits_and_misses_without_query_text():
+    report = build_memory_quality_recall_report(
+        observations=[
+            {
+                "id": "obs-1",
+                "expected_record_ids": ["memory:0", "user:0"],
+                "retrieved_record_ids": ["memory:0", "other:1"],
+                "query": "private customer name and account detail",
+            },
+            {
+                "id": "obs-2",
+                "expected_record_id": "memory:2",
+                "retrieved_record_ids": [],
+                "query_text": "another private lookup",
+            },
+            {
+                "id": "obs-3",
+                "expected_record_ids": [],
+                "retrieved_record_ids": ["memory:3"],
+                "query": "private exploratory query",
+            },
+        ]
+    )
+
+    serialized = report.to_dict()
+
+    assert serialized["observation_count"] == 3
+    assert serialized["expected_record_count"] == 3
+    assert serialized["retrieved_record_count"] == 3
+    assert serialized["hit_count"] == 1
+    assert serialized["miss_count"] == 2
+    assert serialized["unexpected_retrieval_count"] == 2
+    assert serialized["recall_rate"] == 1 / 3
+    assert serialized["precision_rate"] == 1 / 3
+    reasons = {diag["reason"] for diag in serialized["diagnostics"]}
+    assert reasons == {
+        "memory-recall-miss",
+        "memory-recall-unexpected-retrieval",
+    }
+    miss = next(diag for diag in serialized["diagnostics"] if diag["reason"] == "memory-recall-miss")
+    assert miss["record_ids"] == ["user:0", "memory:2"]
+    assert "private customer name" not in repr(serialized)
+    assert "another private lookup" not in repr(serialized)
+    assert "private exploratory query" not in repr(serialized)
