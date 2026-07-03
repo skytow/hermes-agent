@@ -38,6 +38,16 @@ class CliSnapshotProvider(MemoryProvider):
             }
         ]
 
+    def transition_snapshot_events(self):
+        return [
+            {
+                "event_type": "profile_update",
+                "record_id": "provider:1",
+                "content": "private provider transition should not serialize",
+                "content_fingerprint": "transition-fingerprint",
+            }
+        ]
+
 
 def test_memory_status_parser_accepts_quality_json_flags():
     parser = argparse.ArgumentParser()
@@ -112,8 +122,14 @@ def test_memory_status_provider_quality_payload_is_audit_safe(monkeypatch):
     assert provider_quality["quality_report"]["duplicate_count"] == 1
     assert provider_quality["recall_report"]["observation_count"] == 1
     assert provider_quality["recall_report"]["miss_count"] == 1
+    assert provider_quality["transition_report"]["event_counts"] == {"profile_update": 1}
+    transition_diag = provider_quality["transition_report"]["event_diagnostics"][0]
+    assert transition_diag["reason"] == "memory-event-profile-update"
+    assert transition_diag["record_ids"] == ["provider:1"]
+    assert transition_diag["content_fingerprint"] == "transition-fingerprint"
     assert "private provider fact" not in repr(payload)
     assert "private provider query" not in repr(payload)
+    assert "private provider transition" not in repr(payload)
 
 
 def test_memory_status_quality_output_writes_audit_safe_file(tmp_path, monkeypatch, capsys):

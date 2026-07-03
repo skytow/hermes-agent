@@ -453,7 +453,8 @@ def _build_provider_quality_payload(provider_name: str) -> dict | None:
 
     The status command only reads optional provider snapshot hooks and aggregates
     them through MemoryManager.  It does not initialize the provider, write to a
-    provider, mutate memory stores, or serialize raw memory/query text.
+    provider, mutate memory stores, or serialize raw memory/query/transition
+    text.
     """
     if not provider_name:
         return None
@@ -488,6 +489,7 @@ def _build_provider_quality_payload(provider_name: str) -> dict | None:
     payload["available"] = True
     payload["quality_report"] = manager.build_quality_report().to_dict()
     payload["recall_report"] = manager.build_recall_report().to_dict()
+    payload["transition_report"] = manager.build_transition_report(before_records=[]).to_dict()
     return payload
 
 
@@ -551,6 +553,7 @@ def _print_provider_quality_payload(provider_quality: dict | None) -> None:
 
     quality = provider_quality.get("quality_report") or {}
     recall = provider_quality.get("recall_report") or {}
+    transition = provider_quality.get("transition_report") or {}
     print(f"\n  Provider quality ({provider}):")
     print(f"    records:              {quality.get('total_count', 0)}")
     print(f"    tier counts:          {quality.get('tier_counts', {})}")
@@ -560,6 +563,7 @@ def _print_provider_quality_payload(provider_quality: dict | None) -> None:
     print(f"    recall observations:  {recall.get('observation_count', 0)}")
     print(f"    recall hits/misses:   {recall.get('hit_count', 0)}/{recall.get('miss_count', 0)}")
     print(f"    unexpected recalls:   {recall.get('unexpected_retrieval_count', 0)}")
+    print(f"    transition events:    {transition.get('event_counts', {})}")
 
 
 def _write_memory_status_payload(path_value: str, payload: dict) -> Path:
