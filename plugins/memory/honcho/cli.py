@@ -1215,6 +1215,7 @@ def _build_status_quality_payload(hcfg, client, *, recall_probe: str | None = No
         "session_key": session_key,
         "quality_report": manager.build_quality_report().to_dict(),
         "recall_report": manager.build_recall_report().to_dict(),
+        "transition_report": manager.build_transition_report(before_records=[]).to_dict(),
     }
     if probe is not None:
         payload["recall_probe"] = probe
@@ -1224,6 +1225,7 @@ def _build_status_quality_payload(hcfg, client, *, recall_probe: str | None = No
 def _print_status_quality_payload(payload: dict) -> None:
     quality = payload.get("quality_report") or {}
     recall = payload.get("recall_report") or {}
+    transition = payload.get("transition_report") or {}
     probe = payload.get("recall_probe") or {}
     print("\n  Memory quality snapshot (audit-safe):")
     print(f"    session:              {payload.get('session_key') or '(unknown)'}")
@@ -1236,6 +1238,7 @@ def _print_status_quality_payload(payload: dict) -> None:
     print(f"    unresolved conflicts: {quality.get('unresolved_conflict_count', 0)}")
     print(f"    recall observations:  {recall.get('observation_count', 0)}")
     print(f"    recall hits/misses:   {recall.get('hit_count', 0)}/{recall.get('miss_count', 0)}")
+    print(f"    transition events:    {transition.get('event_counts', {})}")
 
 
 def _write_status_quality_payload(path_value: str, payload: dict) -> Path:

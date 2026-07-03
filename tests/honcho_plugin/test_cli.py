@@ -239,8 +239,59 @@ class TestCmdStatus:
         assert payload["quality_report"]["total_count"] == 3
         assert payload["quality_report"]["duplicate_count"] == 1
         assert payload["recall_report"]["observation_count"] == 0
+        assert payload["transition_report"]["event_counts"] == {}
         assert "Private buyer pickup preference" not in repr(payload)
         assert "JR keeps live memory mutations" not in repr(payload)
+
+    def test_status_quality_payload_includes_transition_events_without_raw_text(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+        from plugins.memory.honcho import HonchoMemoryProvider
+
+        class FakeConfig:
+            def resolve_session_name(self):
+                return "telegram:8703694071"
+
+        class FakeManager:
+            def __init__(self, honcho, config):
+                self.honcho = honcho
+                self.config = config
+
+            def get_or_create(self, session_key):
+                return None
+
+            def get_peer_card(self, session_key, peer="user"):
+                if peer == "user":
+                    return ["Private card fact should only feed fingerprints"]
+                if peer == "ai":
+                    return []
+                return []
+
+        def fake_transition_snapshot_events(self):
+            return [
+                {
+                    "event_type": "peer_card_update",
+                    "record_id": "honcho:user:card:0:abc123",
+                    "content": "Private transition text must not serialize",
+                }
+            ]
+
+        monkeypatch.setattr("plugins.memory.honcho.session.HonchoSessionManager", FakeManager)
+        monkeypatch.setattr(
+            HonchoMemoryProvider,
+            "transition_snapshot_events",
+            fake_transition_snapshot_events,
+        )
+
+        payload = honcho_cli._build_status_quality_payload(FakeConfig(), object())
+        transition = payload["transition_report"]
+
+        assert transition["event_counts"] == {"peer_card_update": 1}
+        assert transition["event_diagnostics"][0]["reason"] == "memory-event-peer-card-update"
+        assert transition["event_diagnostics"][0]["record_ids"] == [
+            "honcho:user:card:0:abc123"
+        ]
+        assert "Private transition text" not in repr(payload)
+        assert "Private card fact" not in repr(payload)
 
     def test_status_quality_probe_adds_recall_observation_without_raw_text(self, monkeypatch):
         import plugins.memory.honcho.cli as honcho_cli
