@@ -43,6 +43,16 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
         action="store_true",
         help="Emit machine-readable JSON output",
     )
+    status_parser.add_argument(
+        "--provider-quality",
+        action="store_true",
+        help="Include audit-safe quality/recall metrics from the active external memory provider, when available",
+    )
+    status_parser.add_argument(
+        "--quality-output",
+        metavar="PATH",
+        help="Write the audit-safe memory health JSON payload to PATH",
+    )
     memory_sub.add_parser("off", help="Disable external provider (built-in only)")
     _reset_parser = memory_sub.add_parser(
         "reset",

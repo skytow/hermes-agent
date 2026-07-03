@@ -441,13 +441,70 @@ def _build_builtin_quality_report():
     return store.build_quality_report()
 
 
-def _memory_status_payload(*, provider_name: str, include_quality: bool) -> dict:
+def _load_memory_provider_for_quality(provider_name: str):
+    """Load the configured provider for audit-only quality status."""
+    from plugins.memory import load_memory_provider
+
+    return load_memory_provider(provider_name)
+
+
+def _build_provider_quality_payload(provider_name: str) -> dict | None:
+    """Build audit-safe quality/recall status for the active external provider.
+
+    The status command only reads optional provider snapshot hooks and aggregates
+    them through MemoryManager.  It does not initialize the provider, write to a
+    provider, mutate memory stores, or serialize raw memory/query text.
+    """
+    if not provider_name:
+        return None
+
+    payload = {"provider": provider_name, "available": False}
+    try:
+        provider = _load_memory_provider_for_quality(provider_name)
+    except Exception as exc:
+        payload["reason"] = "load-error"
+        payload["error"] = str(exc)
+        return payload
+
+    if provider is None:
+        payload["reason"] = "not-loaded"
+        return payload
+
+    try:
+        available = bool(provider.is_available())
+    except Exception as exc:
+        payload["reason"] = "availability-error"
+        payload["error"] = str(exc)
+        return payload
+
+    if not available:
+        payload["reason"] = "not-available"
+        return payload
+
+    from agent.memory_manager import MemoryManager
+
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    payload["available"] = True
+    payload["quality_report"] = manager.build_quality_report().to_dict()
+    payload["recall_report"] = manager.build_recall_report().to_dict()
+    return payload
+
+
+def _memory_status_payload(
+    *,
+    provider_name: str,
+    include_quality: bool,
+    include_provider_quality: bool = False,
+) -> dict:
     payload = {
         "built_in": "always active",
         "provider": provider_name or None,
     }
     if include_quality:
         payload["quality_report"] = _build_builtin_quality_report().to_dict()
+    if include_provider_quality:
+        payload["provider_quality"] = _build_provider_quality_payload(provider_name)
     return payload
 
 
@@ -481,6 +538,40 @@ def _print_quality_report(report) -> None:
             print(f"    • … {len(report.diagnostics) - 10} more")
 
 
+def _print_provider_quality_payload(provider_quality: dict | None) -> None:
+    if not provider_quality:
+        print("\n  Provider quality:        no active external provider")
+        return
+
+    provider = provider_quality.get("provider") or "(unknown)"
+    if not provider_quality.get("available"):
+        reason = provider_quality.get("reason", "unavailable")
+        print(f"\n  Provider quality ({provider}): {reason}")
+        return
+
+    quality = provider_quality.get("quality_report") or {}
+    recall = provider_quality.get("recall_report") or {}
+    print(f"\n  Provider quality ({provider}):")
+    print(f"    records:              {quality.get('total_count', 0)}")
+    print(f"    tier counts:          {quality.get('tier_counts', {})}")
+    print(f"    duplicates:           {quality.get('duplicate_count', 0)}")
+    print(f"    stale:                {quality.get('stale_count', 0)}")
+    print(f"    unresolved conflicts: {quality.get('unresolved_conflict_count', 0)}")
+    print(f"    recall observations:  {recall.get('observation_count', 0)}")
+    print(f"    recall hits/misses:   {recall.get('hit_count', 0)}/{recall.get('miss_count', 0)}")
+    print(f"    unexpected recalls:   {recall.get('unexpected_retrieval_count', 0)}")
+
+
+def _write_memory_status_payload(path_value: str, payload: dict) -> Path:
+    output_path = Path(path_value).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return output_path
+
+
 def cmd_status(args) -> None:
     """Show current memory provider config."""
     from hermes_cli.config import load_config
@@ -490,10 +581,29 @@ def cmd_status(args) -> None:
     provider_name = mem_config.get("provider", "")
     include_quality = bool(getattr(args, "quality", False))
     output_json = bool(getattr(args, "json", False))
+    include_provider_quality = bool(getattr(args, "provider_quality", False))
+    quality_output = getattr(args, "quality_output", None)
+    payload = None
+    written_path = None
 
     if output_json:
-        print(json.dumps(_memory_status_payload(provider_name=provider_name, include_quality=include_quality), indent=2, sort_keys=True))
+        payload = _memory_status_payload(
+            provider_name=provider_name,
+            include_quality=include_quality,
+            include_provider_quality=include_provider_quality,
+        )
+        if quality_output:
+            _write_memory_status_payload(quality_output, payload)
+        print(json.dumps(payload, indent=2, sort_keys=True))
         return
+
+    if quality_output:
+        payload = _memory_status_payload(
+            provider_name=provider_name,
+            include_quality=include_quality,
+            include_provider_quality=include_provider_quality,
+        )
+        written_path = _write_memory_status_payload(quality_output, payload)
 
     print(f"\nMemory status\n" + "─" * 40)
     print(f"  Built-in:  always active")
@@ -501,6 +611,16 @@ def cmd_status(args) -> None:
 
     if include_quality:
         _print_quality_report(_build_builtin_quality_report())
+
+    if include_provider_quality:
+        if payload is not None:
+            provider_quality = payload.get("provider_quality")
+        else:
+            provider_quality = _build_provider_quality_payload(provider_name)
+        _print_provider_quality_payload(provider_quality)
+
+    if written_path is not None:
+        print(f"\n  Wrote audit-safe memory quality JSON: {written_path}")
 
     providers = _get_available_providers()
     provider = None
