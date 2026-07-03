@@ -76,6 +76,34 @@ class MemoryQualityReport:
         }
 
 
+@dataclass(frozen=True)
+class MemoryQualityTransitionReport:
+    """Before/after memory quality deltas plus audit-safe event evidence."""
+
+    before: MemoryQualityReport
+    after: MemoryQualityReport
+    total_count_delta: int
+    tier_count_delta: dict[str, int]
+    duplicate_count_delta: int
+    stale_count_delta: int
+    unresolved_conflict_count_delta: int
+    event_counts: dict[str, int]
+    event_diagnostics: list[MemoryQualityDiagnostic] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "before": self.before.to_dict(),
+            "after": self.after.to_dict(),
+            "total_count_delta": self.total_count_delta,
+            "tier_count_delta": dict(self.tier_count_delta),
+            "duplicate_count_delta": self.duplicate_count_delta,
+            "stale_count_delta": self.stale_count_delta,
+            "unresolved_conflict_count_delta": self.unresolved_conflict_count_delta,
+            "event_counts": dict(self.event_counts),
+            "event_diagnostics": [diagnostic.to_dict() for diagnostic in self.event_diagnostics],
+        }
+
+
 def build_memory_quality_report(
     records: Iterable[Mapping[str, Any]],
     *,
@@ -155,6 +183,54 @@ def build_memory_quality_report(
     )
 
 
+def build_memory_quality_transition_report(
+    *,
+    before_records: Iterable[Mapping[str, Any]],
+    after_records: Iterable[Mapping[str, Any]],
+    events: Iterable[Mapping[str, Any]] | None = None,
+    now: datetime | str | None = None,
+    before_obsidian_synced_at: datetime | str | None = None,
+    after_obsidian_synced_at: datetime | str | None = None,
+    before_queued_write_count: int = 0,
+    after_queued_write_count: int = 0,
+) -> MemoryQualityTransitionReport:
+    """Compare two already-snapshotted memory quality states.
+
+    The transition report is intended for garbage-collection/refinement audit
+    surfaces.  It tracks before/after counters and compact event reasons for
+    promotions, deletions, merges, conflict resolution, Obsidian sync, local
+    index rebuilds, or any future event type supplied by a scheduler.  It does
+    not mutate source records and it never serializes raw memory contents.
+    """
+
+    before = build_memory_quality_report(
+        before_records,
+        now=now,
+        obsidian_synced_at=before_obsidian_synced_at,
+        queued_write_count=before_queued_write_count,
+    )
+    after = build_memory_quality_report(
+        after_records,
+        now=now,
+        obsidian_synced_at=after_obsidian_synced_at,
+        queued_write_count=after_queued_write_count,
+    )
+    event_counts, event_diagnostics = _event_metrics(events or [])
+    return MemoryQualityTransitionReport(
+        before=before,
+        after=after,
+        total_count_delta=after.total_count - before.total_count,
+        tier_count_delta=_count_delta(before.tier_counts, after.tier_counts),
+        duplicate_count_delta=after.duplicate_count - before.duplicate_count,
+        stale_count_delta=after.stale_count - before.stale_count,
+        unresolved_conflict_count_delta=(
+            after.unresolved_conflict_count - before.unresolved_conflict_count
+        ),
+        event_counts=event_counts,
+        event_diagnostics=event_diagnostics,
+    )
+
+
 def _normalize_record(record: Mapping[str, Any], index: int) -> dict[str, Any]:
     record_id = str(record.get("id") or record.get("key") or f"record-{index}")
     tier = _normalize_tier(record.get("tier") or record.get("state") or record.get("target"))
@@ -171,6 +247,64 @@ def _normalize_record(record: Mapping[str, Any], index: int) -> dict[str, Any]:
         or tier in {"conflicted", "conflict"}
         or conflict_status in {"unresolved", "conflicted", "conflict", "unresolved_conflict"},
     }
+
+
+def _count_delta(before: Mapping[str, int], after: Mapping[str, int]) -> dict[str, int]:
+    tiers = sorted(set(before) | set(after))
+    return {
+        tier: delta
+        for tier in tiers
+        if (delta := int(after.get(tier, 0)) - int(before.get(tier, 0))) != 0
+    }
+
+
+def _event_metrics(
+    events: Iterable[Mapping[str, Any]],
+) -> tuple[dict[str, int], list[MemoryQualityDiagnostic]]:
+    counts: Counter[str] = Counter()
+    diagnostics: list[MemoryQualityDiagnostic] = []
+    for event in events:
+        event_type = _normalize_event_type(
+            event.get("event_type") or event.get("eventType") or event.get("action")
+        )
+        counts[event_type] += 1
+        content = str(event.get("content") or event.get("text") or event.get("value") or "")
+        content_key = _content_key(content)
+        diagnostics.append(
+            MemoryQualityDiagnostic(
+                reason=f"memory-event-{event_type.replace('_', '-')}",
+                severity="info",
+                record_ids=_event_record_ids(event),
+                canonical_record_id=_event_canonical_record_id(event),
+                content_fingerprint=(_fingerprint(content_key) if content_key else None),
+            )
+        )
+    return dict(sorted(counts.items())), diagnostics
+
+
+def _event_record_ids(event: Mapping[str, Any]) -> list[str]:
+    raw_ids = event.get("record_ids") or event.get("recordIds")
+    if raw_ids is None:
+        raw_id = event.get("record_id") or event.get("recordId") or event.get("id") or event.get("key")
+        raw_ids = [raw_id] if raw_id is not None else []
+    if isinstance(raw_ids, (str, bytes)):
+        raw_ids = [raw_ids]
+    try:
+        return [str(record_id) for record_id in raw_ids if record_id is not None]
+    except TypeError:
+        return [str(raw_ids)] if raw_ids is not None else []
+
+
+def _event_canonical_record_id(event: Mapping[str, Any]) -> str | None:
+    value = event.get("canonical_record_id") or event.get("canonicalRecordId")
+    if value is None:
+        return None
+    return str(value)
+
+
+def _normalize_event_type(value: Any) -> str:
+    event_type = str(value or "unknown").strip().lower().replace(" ", "_").replace("-", "_")
+    return event_type or "unknown"
 
 
 def _normalize_tier(value: Any) -> str:

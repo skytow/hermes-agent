@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from agent.memory_quality import build_memory_quality_report
+from agent.memory_quality import build_memory_quality_report, build_memory_quality_transition_report
 from tools.memory_tool import MemoryStore
 
 
@@ -120,3 +120,67 @@ def test_memory_store_builds_audit_safe_quality_report_from_live_snapshot():
     assert serialized["obsidian_sync_lag_seconds"] == 1800
     assert "Duplicate private fact" not in repr(serialized)
     assert "User durable preference" not in repr(serialized)
+
+
+def test_memory_quality_transition_report_tracks_gc_event_deltas_without_private_content():
+    report = build_memory_quality_transition_report(
+        before_records=[
+            {"id": "candidate-a", "tier": "candidate", "content": "sensitive duplicate fact"},
+            {"id": "candidate-b", "tier": "candidate", "content": " sensitive duplicate fact "},
+            {"id": "stale-c", "tier": "stale", "content": "old private detail", "stale": True},
+            {
+                "id": "conflict-d",
+                "tier": "conflicted",
+                "content": "conflicting private detail",
+                "conflict_status": "unresolved",
+            },
+        ],
+        after_records=[
+            {"id": "candidate-a", "tier": "durable", "content": "sensitive duplicate fact"},
+            {"id": "conflict-d", "tier": "durable", "content": "conflicting private detail"},
+        ],
+        events=[
+            {"event_type": "promotion", "record_id": "candidate-a", "content": "sensitive duplicate fact"},
+            {"event_type": "merge", "record_ids": ["candidate-a", "candidate-b"], "canonical_record_id": "candidate-a"},
+            {"event_type": "deletion", "record_id": "stale-c", "reason": "expired-stale"},
+            {"event_type": "conflict_resolution", "record_id": "conflict-d"},
+            {"event_type": "obsidian_sync", "record_id": "candidate-a"},
+            {"event_type": "local_index_rebuild", "record_id": "candidate-a"},
+        ],
+    )
+
+    serialized = report.to_dict()
+
+    assert serialized["before"]["total_count"] == 4
+    assert serialized["after"]["total_count"] == 2
+    assert serialized["total_count_delta"] == -2
+    assert serialized["duplicate_count_delta"] == -1
+    assert serialized["stale_count_delta"] == -1
+    assert serialized["unresolved_conflict_count_delta"] == -1
+    assert serialized["tier_count_delta"] == {
+        "candidate": -2,
+        "conflicted": -1,
+        "durable": 2,
+        "stale": -1,
+    }
+    assert serialized["event_counts"] == {
+        "conflict_resolution": 1,
+        "deletion": 1,
+        "local_index_rebuild": 1,
+        "merge": 1,
+        "obsidian_sync": 1,
+        "promotion": 1,
+    }
+    assert {diag["reason"] for diag in serialized["event_diagnostics"]} == {
+        "memory-event-conflict-resolution",
+        "memory-event-deletion",
+        "memory-event-local-index-rebuild",
+        "memory-event-merge",
+        "memory-event-obsidian-sync",
+        "memory-event-promotion",
+    }
+    promotion = next(diag for diag in serialized["event_diagnostics"] if diag["reason"] == "memory-event-promotion")
+    assert "content_fingerprint" in promotion
+    assert "sensitive duplicate fact" not in repr(serialized)
+    assert "old private detail" not in repr(serialized)
+    assert "conflicting private detail" not in repr(serialized)
