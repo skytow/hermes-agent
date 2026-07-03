@@ -7,6 +7,7 @@ the provider's config schema. Writes config to config.yaml + .env.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import shlex
@@ -431,6 +432,55 @@ def _write_env_vars(env_path: Path, env_writes: dict) -> None:
 # Status
 # ---------------------------------------------------------------------------
 
+def _build_builtin_quality_report():
+    """Build an audit-safe report for already persisted built-in memory."""
+    from tools.memory_tool import MemoryStore
+
+    store = MemoryStore()
+    store.load_from_disk()
+    return store.build_quality_report()
+
+
+def _memory_status_payload(*, provider_name: str, include_quality: bool) -> dict:
+    payload = {
+        "built_in": "always active",
+        "provider": provider_name or None,
+    }
+    if include_quality:
+        payload["quality_report"] = _build_builtin_quality_report().to_dict()
+    return payload
+
+
+def _print_quality_report(report) -> None:
+    print(f"\n  Built-in quality:")
+    print(f"    records:              {report.total_count}")
+    print(f"    tier counts:          {report.tier_counts}")
+    print(f"    duplicates:           {report.duplicate_count} ({report.duplicate_rate:.0%})")
+    print(f"    stale:                {report.stale_count} ({report.stale_rate:.0%})")
+    print(f"    unresolved conflicts: {report.unresolved_conflict_count}")
+    avg = "n/a" if report.average_confidence is None else f"{report.average_confidence:.2f}"
+    print(f"    avg confidence:       {avg}")
+    print(f"    queued writes:        {report.queued_write_count}")
+    if report.obsidian_sync_lag_seconds is not None:
+        print(f"    Obsidian sync lag:    {report.obsidian_sync_lag_seconds}s")
+
+    if report.diagnostics:
+        print(f"\n  Quality diagnostics (audit-safe):")
+        for diagnostic in report.diagnostics[:10]:
+            data = diagnostic.to_dict()
+            suffix = ""
+            if data.get("canonical_record_id"):
+                suffix += f" canonical={data['canonical_record_id']}"
+            if data.get("content_fingerprint"):
+                suffix += f" fingerprint={data['content_fingerprint']}"
+            print(
+                f"    • {data['severity']} {data['reason']} "
+                f"ids={','.join(data['record_ids'])}{suffix}"
+            )
+        if len(report.diagnostics) > 10:
+            print(f"    • … {len(report.diagnostics) - 10} more")
+
+
 def cmd_status(args) -> None:
     """Show current memory provider config."""
     from hermes_cli.config import load_config
@@ -438,10 +488,19 @@ def cmd_status(args) -> None:
     config = load_config()
     mem_config = config.get("memory", {})
     provider_name = mem_config.get("provider", "")
+    include_quality = bool(getattr(args, "quality", False))
+    output_json = bool(getattr(args, "json", False))
+
+    if output_json:
+        print(json.dumps(_memory_status_payload(provider_name=provider_name, include_quality=include_quality), indent=2, sort_keys=True))
+        return
 
     print(f"\nMemory status\n" + "─" * 40)
     print(f"  Built-in:  always active")
     print(f"  Provider:  {provider_name or '(none — built-in only)'}")
+
+    if include_quality:
+        _print_quality_report(_build_builtin_quality_report())
 
     providers = _get_available_providers()
     provider = None

@@ -32,7 +32,17 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
         default=None,
         help="Provider to configure directly (e.g. honcho), skipping the picker",
     )
-    memory_sub.add_parser("status", help="Show current memory provider config")
+    status_parser = memory_sub.add_parser("status", help="Show current memory provider config")
+    status_parser.add_argument(
+        "--quality",
+        action="store_true",
+        help="Include audit-safe built-in memory quality metrics",
+    )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON output",
+    )
     memory_sub.add_parser("off", help="Disable external provider (built-in only)")
     _reset_parser = memory_sub.add_parser(
         "reset",
