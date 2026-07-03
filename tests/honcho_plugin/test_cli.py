@@ -187,11 +187,19 @@ class TestCmdStatus:
         parser = argparse.ArgumentParser(prog="hermes honcho")
         honcho_cli.register_cli(parser)
 
-        args = parser.parse_args(["status", "--quality", "--quality-output", "/tmp/honcho-quality.json"])
+        args = parser.parse_args([
+            "status",
+            "--quality",
+            "--quality-output",
+            "/tmp/honcho-quality.json",
+            "--quality-probe",
+            "status report recall",
+        ])
 
         assert args.honcho_command == "status"
         assert args.quality is True
         assert args.quality_output == "/tmp/honcho-quality.json"
+        assert args.quality_probe == "status report recall"
 
     def test_status_quality_payload_summarizes_initialized_peer_cards_without_raw_text(self, monkeypatch):
         import plugins.memory.honcho.cli as honcho_cli
@@ -233,6 +241,53 @@ class TestCmdStatus:
         assert payload["recall_report"]["observation_count"] == 0
         assert "Private buyer pickup preference" not in repr(payload)
         assert "JR keeps live memory mutations" not in repr(payload)
+
+    def test_status_quality_probe_adds_recall_observation_without_raw_text(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        calls = []
+
+        class FakeConfig:
+            def resolve_session_name(self):
+                return "telegram:8703694071"
+
+        class FakeManager:
+            def __init__(self, honcho, config):
+                self.honcho = honcho
+                self.config = config
+
+            def get_or_create(self, session_key):
+                calls.append(("get_or_create", session_key))
+
+            def get_peer_card(self, session_key, peer="user"):
+                calls.append(("get_peer_card", session_key, peer))
+                if peer == "user":
+                    return [
+                        "Private pickup details are only for recall matching",
+                        "Unmatched private card fact must not leak",
+                    ]
+                if peer == "ai":
+                    return []
+                return []
+
+            def search_context(self, session_key, query, max_tokens=800, peer="user"):
+                calls.append(("search_context", session_key, query, max_tokens, peer))
+                return "Result includes Private pickup details are only for recall matching"
+
+        monkeypatch.setattr("plugins.memory.honcho.session.HonchoSessionManager", FakeManager)
+
+        payload = honcho_cli._build_status_quality_payload(
+            FakeConfig(), object(), recall_probe="private customer query must stay out"
+        )
+
+        assert any(call[0] == "search_context" for call in calls)
+        assert payload["recall_probe"] == {"route": "honcho_search", "peer": "user", "ran": True}
+        assert payload["recall_report"]["observation_count"] == 1
+        assert payload["recall_report"]["hit_count"] == 1
+        assert payload["recall_report"]["miss_count"] == 1
+        assert "private customer query" not in repr(payload)
+        assert "Private pickup details" not in repr(payload)
+        assert "Unmatched private card fact" not in repr(payload)
 
     def test_reports_connection_failure_when_session_setup_fails(self, monkeypatch, capsys, tmp_path):
         import plugins.memory.honcho.cli as honcho_cli

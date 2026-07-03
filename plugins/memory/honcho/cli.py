@@ -1020,7 +1020,8 @@ def _all_profile_host_configs() -> list[tuple[str, str, dict]]:
 def cmd_status(args) -> None:
     """Show current Honcho config and connection status."""
     show_all = getattr(args, "all", False)
-    include_quality = bool(getattr(args, "quality", False))
+    quality_probe = getattr(args, "quality_probe", None)
+    include_quality = bool(getattr(args, "quality", False) or quality_probe)
     quality_output = getattr(args, "quality_output", None)
 
     if show_all:
@@ -1119,7 +1120,9 @@ def cmd_status(args) -> None:
             client = get_honcho_client(hcfg)
             _show_peer_cards(hcfg, client)
             if include_quality or quality_output:
-                quality_payload = _build_status_quality_payload(hcfg, client)
+                quality_payload = _build_status_quality_payload(
+                    hcfg, client, recall_probe=quality_probe
+                )
                 if include_quality:
                     _print_status_quality_payload(quality_payload)
                 if quality_output:
@@ -1172,14 +1175,17 @@ def _show_peer_cards(hcfg, client) -> None:
         print(f"\n  Peer data unavailable: {e}\n")
 
 
-def _build_status_quality_payload(hcfg, client) -> dict:
+def _build_status_quality_payload(hcfg, client, *, recall_probe: str | None = None) -> dict:
     """Build audit-safe Honcho memory-quality payload for the active status session.
 
     Unlike ``hermes memory status --provider-quality``, this runs inside the
     Honcho status command after a client/session is already being inspected. It
     creates no memory writes and only snapshots peer-card facts into aggregate
     quality/recall counters; raw fact text is consumed by the report builder but
-    never serialized in the returned payload.
+    never serialized in the returned payload.  When ``recall_probe`` is passed,
+    the status command runs one explicit read-only ``honcho_search`` probe first
+    so initialized-provider recall counters can be surfaced without storing the
+    private query or result text.
     """
     from agent.memory_manager import MemoryManager
     from plugins.memory.honcho import HonchoMemoryProvider
@@ -1194,22 +1200,35 @@ def _build_status_quality_payload(hcfg, client) -> dict:
     provider._session_key = session_key
     provider._session_initialized = True
 
+    probe = None
+    if recall_probe:
+        provider.handle_tool_call(
+            "honcho_search", {"query": str(recall_probe), "peer": "user"}
+        )
+        probe = {"route": "honcho_search", "peer": "user", "ran": True}
+
     manager = MemoryManager()
     manager.add_provider(provider)
-    return {
+    payload = {
         "provider": "honcho",
         "available": True,
         "session_key": session_key,
         "quality_report": manager.build_quality_report().to_dict(),
         "recall_report": manager.build_recall_report().to_dict(),
     }
+    if probe is not None:
+        payload["recall_probe"] = probe
+    return payload
 
 
 def _print_status_quality_payload(payload: dict) -> None:
     quality = payload.get("quality_report") or {}
     recall = payload.get("recall_report") or {}
+    probe = payload.get("recall_probe") or {}
     print("\n  Memory quality snapshot (audit-safe):")
     print(f"    session:              {payload.get('session_key') or '(unknown)'}")
+    if probe:
+        print(f"    recall probe:         {probe.get('route')} ({probe.get('peer')})")
     print(f"    peer-card records:    {quality.get('total_count', 0)}")
     print(f"    tier counts:          {quality.get('tier_counts', {})}")
     print(f"    duplicates:           {quality.get('duplicate_count', 0)}")
@@ -1862,6 +1881,13 @@ def register_cli(subparser) -> None:
     status_parser.add_argument(
         "--quality-output", metavar="PATH",
         help="Write audit-safe Honcho memory quality JSON to PATH",
+    )
+    status_parser.add_argument(
+        "--quality-probe", metavar="QUERY",
+        help=(
+            "Run one read-only Honcho search before reporting quality so "
+            "recall hit/miss counters include initialized-provider evidence"
+        ),
     )
 
     subs.add_parser("peers", help="Show peer identities across all profiles")
