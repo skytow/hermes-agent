@@ -200,6 +200,9 @@ class _JournaledMemoryWrite:
     important: bool
     pinned: bool
     synced: bool
+    sync_retry_attempts: int = 0
+    next_sync_retry_at: str = ""
+    last_sync_error_code: str = ""
 
 
 _MEMORY_ENTRY_DELIMITER = "\n§\n"
@@ -279,6 +282,9 @@ def build_memory_startup_recovery_writes(
                 synced=journaled_write.synced,
                 local_indexed=journaled_write.id in local_ids,
                 recovery_warnings=recovery_warnings,
+                sync_retry_attempts=journaled_write.sync_retry_attempts,
+                next_sync_retry_at=journaled_write.next_sync_retry_at,
+                last_sync_error_code=journaled_write.last_sync_error_code,
             )
         )
     return tuple(writes)
@@ -306,6 +312,22 @@ def _journal_bool(value: object, *, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "n", "off"}:
             return False
     return bool(value)
+
+
+def _journal_int(value: object, *, default: int = 0) -> int:
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return default
+        try:
+            return int(stripped)
+        except ValueError:
+            return default
+    return default
 
 
 def _read_memory_entries(path: Path) -> tuple[str, ...]:
@@ -374,6 +396,11 @@ def _read_memory_journal(
                     important=important,
                     pinned=pinned,
                     synced=_journal_bool(synced_value),
+                    sync_retry_attempts=_journal_int(
+                        record.get("sync_retry_attempts") or record.get("retry_attempts")
+                    ),
+                    next_sync_retry_at=str(record.get("next_sync_retry_at") or "").strip(),
+                    last_sync_error_code=str(record.get("last_sync_error_code") or "").strip(),
                 )
             )
     return ids, keys, tuple(warnings), tuple(journaled_writes)

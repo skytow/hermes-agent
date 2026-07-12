@@ -849,6 +849,62 @@ def test_memory_startup_snapshot_adapter_recovers_journal_only_offline_write_wit
     assert "opal" not in rendered
 
 
+def test_memory_startup_snapshot_adapter_propagates_journal_retry_metadata_without_content(tmp_path):
+    memory_dir = tmp_path / "memories"
+    memory_dir.mkdir()
+    offline_text = "Pinned memory: Echo private shipping token jasper waits for provider sync."
+    journal_path = memory_dir / "memory-wal.jsonl"
+    journal_path.write_text(
+        json.dumps(
+            {
+                "write_id": "offline-echo-002",
+                "target": "memory",
+                "content": offline_text,
+                "important": True,
+                "pinned": True,
+                "synced": False,
+                "sync_retry_attempts": 3,
+                "next_sync_retry_at": "2026-07-12T23:45:00Z",
+                "last_sync_error_code": "provider_503",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    writes = build_memory_startup_recovery_writes(
+        memory_dir,
+        journal_path=journal_path,
+    )
+
+    assert len(writes) == 1
+    write = writes[0]
+    assert write.id == "offline-echo-002"
+    assert write.sync_retry_attempts == 3
+    assert write.next_sync_retry_at == "2026-07-12T23:45:00Z"
+    assert write.last_sync_error_code == "provider_503"
+
+    report = build_memory_backup_recovery_report(
+        writes,
+        note_index=LocalNoteIndex(()),
+    )
+
+    assert report.sync_retry_plan_by_id == {
+        "offline-echo-002": {
+            "attempts": 3,
+            "next_retry_at": "2026-07-12T23:45:00Z",
+            "last_error_code": "provider_503",
+        }
+    }
+    checks = report.diagnostics["checks"]
+    assert isinstance(checks, dict)
+    assert checks["sync_retry_plan"] == 1
+    rendered = report.to_markdown()
+    assert "offline-echo-002: attempts=3 next_retry_at=2026-07-12T23:45:00Z last_error_code=provider_503" in rendered
+    assert "Echo private" not in rendered
+    assert "jasper" not in rendered
+
+
 def test_memory_startup_snapshot_adapter_recovers_from_corrupted_local_index_cache(tmp_path):
     memory_dir = tmp_path / "memories"
     memory_dir.mkdir()
