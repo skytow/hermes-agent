@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import hashlib
+import json
 import re
 from typing import Iterable, Mapping, Sequence
 
@@ -182,6 +184,113 @@ class MemoryRecoveryWrite:
     def needs_durable_protection(self) -> bool:
         """Whether this write must survive GC, sync loss, and restarts."""
         return self.important or self.pinned
+
+
+_MEMORY_ENTRY_DELIMITER = "\n§\n"
+_PINNED_MEMORY_PREFIXES = (
+    "pinned memory:",
+    "pinned:",
+)
+
+
+def build_memory_startup_recovery_writes(
+    memory_dir: Path | str,
+    *,
+    journal_path: Path | str | None = None,
+    local_index_ids: Sequence[str] = (),
+) -> tuple[MemoryRecoveryWrite, ...]:
+    """Load built-in memory files as redaction-safe startup recovery snapshots.
+
+    This adapter is intentionally read-only: it parses the profile's ``MEMORY.md``
+    and ``USER.md`` files, optionally correlates them with a write-ahead journal,
+    and returns :class:`MemoryRecoveryWrite` records for the pure recovery checker.
+    It never writes memory, rebuilds indexes, or touches provider state.
+
+    Generated write ids are stable hashes of the target surface plus normalized
+    content, so diagnostics can name recoverable gaps without printing memory
+    text.  Journal records can match either by ``id`` / ``write_id`` or by the
+    same ``target`` + ``content`` pair used by built-in memory writes.
+    """
+    base = Path(memory_dir)
+    local_ids = set(local_index_ids)
+    journal_ids, journal_keys = _read_memory_journal(journal_path, base)
+
+    writes: list[MemoryRecoveryWrite] = []
+    for target, filename in (("memory", "MEMORY.md"), ("user", "USER.md")):
+        for entry in _read_memory_entries(base / filename):
+            write_id = _memory_snapshot_id(target, entry)
+            normalized = _normalize(entry)
+            writes.append(
+                MemoryRecoveryWrite(
+                    id=write_id,
+                    content=entry,
+                    important=True,
+                    pinned=_looks_pinned_memory(entry),
+                    journaled=(
+                        write_id in journal_ids
+                        or (target, normalized) in journal_keys
+                        or ("", normalized) in journal_keys
+                    ),
+                    synced=True,
+                    local_indexed=write_id in local_ids,
+                )
+            )
+    return tuple(writes)
+
+
+def _memory_snapshot_id(target: str, content: str) -> str:
+    digest = hashlib.sha256(f"{target}\0{_normalize(content)}".encode("utf-8")).hexdigest()
+    return f"{target}-{digest[:16]}"
+
+
+def _looks_pinned_memory(content: str) -> bool:
+    normalized = _normalize(content)
+    return normalized.startswith(_PINNED_MEMORY_PREFIXES) or " pinned memory" in normalized
+
+
+def _read_memory_entries(path: Path) -> tuple[str, ...]:
+    if not path.exists():
+        return ()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raw = path.read_text(errors="replace")
+    return tuple(entry.strip() for entry in raw.split(_MEMORY_ENTRY_DELIMITER) if entry.strip())
+
+
+def _read_memory_journal(
+    journal_path: Path | str | None,
+    memory_dir: Path,
+) -> tuple[set[str], set[tuple[str, str]]]:
+    path = Path(journal_path) if journal_path is not None else memory_dir / "memory-wal.jsonl"
+    if not path.exists():
+        return set(), set()
+
+    ids: set[str] = set()
+    keys: set[tuple[str, str]] = set()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError:
+        lines = path.read_text(errors="replace").splitlines()
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            record = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, Mapping):
+            continue
+        record_id = str(record.get("write_id") or record.get("id") or "").strip()
+        if record_id:
+            ids.add(record_id)
+        content = record.get("content") or record.get("entry") or record.get("value")
+        if isinstance(content, str) and content.strip():
+            target = str(record.get("target") or "").strip()
+            keys.add((target, _normalize(content)))
+    return ids, keys
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,6 @@
 """Never-lose-important-context validation scenarios."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from agent.context_validation import (
     MemoryRecoveryWrite,
     build_context_validation_report,
     build_memory_backup_recovery_report,
+    build_memory_startup_recovery_writes,
 )
 from tools.memory_tool import MemoryStore
 
@@ -370,3 +372,50 @@ def test_memory_backup_recovery_report_exposes_redacted_startup_rebuild_tasks(tm
     assert "mem-orphaned ->" not in rendered
     assert "Nova account" not in rendered
     assert "Orphaned memory" not in rendered
+
+
+def test_memory_startup_snapshot_adapter_reads_journal_and_notes_without_content(tmp_path):
+    memory_dir = tmp_path / "memories"
+    memory_dir.mkdir()
+    memory_text = "Pinned memory: Atlas launch codeword redwood must survive restart."
+    (memory_dir / "MEMORY.md").write_text(memory_text, encoding="utf-8")
+    journal_path = memory_dir / "memory-wal.jsonl"
+    journal_path.write_text(
+        json.dumps({"target": "memory", "content": memory_text}) + "\n",
+        encoding="utf-8",
+    )
+    vault = tmp_path / "vault"
+    note = vault / "memories" / "atlas.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(f"# Atlas\n\n{memory_text}\n", encoding="utf-8")
+
+    writes = build_memory_startup_recovery_writes(
+        memory_dir,
+        journal_path=journal_path,
+        local_index_ids=(),
+    )
+
+    assert len(writes) == 1
+    write = writes[0]
+    assert write.important is True
+    assert write.pinned is True
+    assert write.journaled is True
+    assert write.local_indexed is False
+    assert write.id.startswith("memory-")
+    assert write.id == build_memory_startup_recovery_writes(
+        memory_dir,
+        journal_path=journal_path,
+        local_index_ids=(),
+    )[0].id
+
+    report = build_memory_backup_recovery_report(
+        writes,
+        note_index=LocalNoteIndex.from_path(vault),
+    )
+
+    assert report.recoverable_index_ids == (write.id,)
+    assert report.startup_recovery_tasks[0].sources == ("journal", "durable_note")
+    rendered = report.to_markdown()
+    assert write.id in rendered
+    assert "Atlas launch" not in rendered
+    assert "redwood" not in rendered
