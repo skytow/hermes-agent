@@ -184,6 +184,15 @@ class MemoryRecoveryWrite:
         return self.important or self.pinned
 
 
+@dataclass(frozen=True)
+class MemoryStartupRecoveryTask:
+    """Redacted startup rebuild instruction for a missing local memory index."""
+
+    write_id: str
+    sources: tuple[str, ...]
+    target_surface: str = "local_index"
+
+
 @dataclass
 class MemoryBackupRecoveryReport:
     """Backup/sync/recovery status without exposing private memory content."""
@@ -195,6 +204,7 @@ class MemoryBackupRecoveryReport:
     recoverable_index_ids: tuple[str, ...] = ()
     unrecoverable_index_ids: tuple[str, ...] = ()
     recovery_sources_by_id: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    startup_recovery_tasks: tuple[MemoryStartupRecoveryTask, ...] = ()
     protected_from_gc_ids: tuple[str, ...] = ()
     unresolved_conflicts: tuple[ContextConflict, ...] = ()
     diagnostics: dict[str, object] = field(default_factory=dict)
@@ -247,6 +257,16 @@ class MemoryBackupRecoveryReport:
         if self.recovery_sources_by_id:
             for write_id, sources in sorted(self.recovery_sources_by_id.items()):
                 lines.append(f"- {write_id}: {', '.join(sources)}")
+        else:
+            lines.append("- none")
+        lines.append("")
+
+        lines.append("## startup recovery tasks")
+        if self.startup_recovery_tasks:
+            for task in self.startup_recovery_tasks:
+                lines.append(
+                    f"- {task.write_id} -> {task.target_surface} via {', '.join(task.sources)}"
+                )
         else:
             lines.append("- none")
         lines.append("")
@@ -392,6 +412,7 @@ def build_memory_backup_recovery_report(
     recoverable: list[str] = []
     unrecoverable: list[str] = []
     recovery_sources: dict[str, tuple[str, ...]] = {}
+    startup_tasks: list[MemoryStartupRecoveryTask] = []
     protected: list[str] = []
     conflict_groups: dict[str, list[str]] = {}
 
@@ -416,6 +437,9 @@ def build_memory_backup_recovery_report(
                 if write.journaled or note_hits:
                     recoverable.append(write.id)
                     recovery_sources[write.id] = tuple(sources)
+                    startup_tasks.append(
+                        MemoryStartupRecoveryTask(write_id=write.id, sources=tuple(sources))
+                    )
                 else:
                     unrecoverable.append(write.id)
 
@@ -430,6 +454,7 @@ def build_memory_backup_recovery_report(
         "last_successful_sync_at": last_successful_sync_at or "unknown",
         "last_garbage_collection_run_at": last_gc_run_at or "unknown",
         "queued_write_count": len(retryable),
+        "startup_recovery_task_count": len(startup_tasks),
         "conflict_count": len(conflicts),
         "protected_memory_count": len(protected),
         "recovery_status": "ok"
@@ -452,6 +477,7 @@ def build_memory_backup_recovery_report(
         recoverable_index_ids=tuple(recoverable),
         unrecoverable_index_ids=tuple(unrecoverable),
         recovery_sources_by_id=recovery_sources,
+        startup_recovery_tasks=tuple(startup_tasks),
         protected_from_gc_ids=tuple(protected),
         unresolved_conflicts=conflicts,
         diagnostics=diagnostics,

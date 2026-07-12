@@ -319,3 +319,54 @@ def test_memory_backup_recovery_report_names_rebuild_sources_without_content(tmp
     assert "mem-atlas-escalation: journal, durable_note" in rendered
     assert "Atlas escalation" not in rendered
     assert "pinned runbook" not in rendered
+
+
+def test_memory_backup_recovery_report_exposes_redacted_startup_rebuild_tasks(tmp_path):
+    vault = tmp_path / "vault"
+    note = vault / "memories" / "support-window.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "# Support window\n\nPinned memory: Nova account prefers support callbacks after 4 PM.\n",
+        encoding="utf-8",
+    )
+
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="mem-nova-callback",
+                content="Nova account prefers support callbacks after 4 PM.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=True,
+                local_indexed=False,
+                durable_note_terms=("Nova", "support callbacks", "4 PM"),
+            ),
+            MemoryRecoveryWrite(
+                id="mem-orphaned",
+                content="Orphaned memory has no recovery surface.",
+                important=True,
+                pinned=True,
+                journaled=False,
+                synced=False,
+                local_indexed=False,
+                durable_note_terms=("Orphaned memory", "recovery surface"),
+            ),
+        ],
+        note_index=LocalNoteIndex.from_path(vault),
+    )
+
+    assert [task.write_id for task in report.startup_recovery_tasks] == [
+        "mem-nova-callback"
+    ]
+    task = report.startup_recovery_tasks[0]
+    assert task.target_surface == "local_index"
+    assert task.sources == ("journal", "durable_note")
+    assert report.diagnostics["startup_recovery_task_count"] == 1
+
+    rendered = report.to_markdown()
+    assert "startup recovery tasks" in rendered
+    assert "mem-nova-callback -> local_index via journal, durable_note" in rendered
+    assert "mem-orphaned ->" not in rendered
+    assert "Nova account" not in rendered
+    assert "Orphaned memory" not in rendered
