@@ -800,6 +800,55 @@ def test_memory_startup_snapshot_adapter_reads_journal_and_notes_without_content
     assert "redwood" not in rendered
 
 
+def test_memory_startup_snapshot_adapter_recovers_journal_only_offline_write_without_content(tmp_path):
+    memory_dir = tmp_path / "memories"
+    memory_dir.mkdir()
+    offline_text = "Pinned memory: Delta private pickup token opal queued while offline."
+    journal_path = memory_dir / "memory-wal.jsonl"
+    journal_path.write_text(
+        json.dumps(
+            {
+                "write_id": "offline-delta-001",
+                "target": "memory",
+                "content": offline_text,
+                "important": True,
+                "pinned": True,
+                "synced": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    writes = build_memory_startup_recovery_writes(
+        memory_dir,
+        journal_path=journal_path,
+    )
+
+    assert len(writes) == 1
+    write = writes[0]
+    assert write.id == "offline-delta-001"
+    assert write.important is True
+    assert write.pinned is True
+    assert write.journaled is True
+    assert write.synced is False
+    assert write.local_indexed is False
+
+    report = build_memory_backup_recovery_report(
+        writes,
+        note_index=LocalNoteIndex(()),
+    )
+
+    assert not report.ok
+    assert report.retryable_write_ids == ("offline-delta-001",)
+    assert report.recoverable_index_ids == ("offline-delta-001",)
+    assert report.recovery_sources_by_id == {"offline-delta-001": ("journal",)}
+    rendered = report.to_markdown()
+    assert "offline-delta-001 -> local_index via journal" in rendered
+    assert "Delta private" not in rendered
+    assert "opal" not in rendered
+
+
 def test_memory_startup_snapshot_adapter_recovers_from_corrupted_local_index_cache(tmp_path):
     memory_dir = tmp_path / "memories"
     memory_dir.mkdir()

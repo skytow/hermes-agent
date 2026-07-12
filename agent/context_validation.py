@@ -190,6 +190,18 @@ class MemoryRecoveryWrite:
         return self.important or self.pinned
 
 
+@dataclass(frozen=True)
+class _JournaledMemoryWrite:
+    """Internal redaction-safe snapshot recovered directly from the WAL."""
+
+    id: str
+    target: str
+    content: str
+    important: bool
+    pinned: bool
+    synced: bool
+
+
 _MEMORY_ENTRY_DELIMITER = "\n§\n"
 _PINNED_MEMORY_PREFIXES = (
     "pinned memory:",
@@ -222,14 +234,21 @@ def build_memory_startup_recovery_writes(
         local_index_cache_path
     )
     local_ids.update(local_cache_ids)
-    journal_ids, journal_keys, journal_warnings = _read_memory_journal(journal_path, base)
+    journal_ids, journal_keys, journal_warnings, journaled_writes = _read_memory_journal(
+        journal_path,
+        base,
+    )
     recovery_warnings = tuple(dict.fromkeys((*local_cache_warnings, *journal_warnings)))
 
     writes: list[MemoryRecoveryWrite] = []
+    seen_ids: set[str] = set()
+    seen_contents: set[str] = set()
     for target, filename in (("memory", "MEMORY.md"), ("user", "USER.md")):
         for entry in _read_memory_entries(base / filename):
             write_id = _memory_snapshot_id(target, entry)
             normalized = _normalize(entry)
+            seen_ids.add(write_id)
+            seen_contents.add(normalized)
             writes.append(
                 MemoryRecoveryWrite(
                     id=write_id,
@@ -246,6 +265,22 @@ def build_memory_startup_recovery_writes(
                     recovery_warnings=recovery_warnings,
                 )
             )
+    for journaled_write in journaled_writes:
+        normalized = _normalize(journaled_write.content)
+        if journaled_write.id in seen_ids or normalized in seen_contents:
+            continue
+        writes.append(
+            MemoryRecoveryWrite(
+                id=journaled_write.id,
+                content=journaled_write.content,
+                important=journaled_write.important,
+                pinned=journaled_write.pinned,
+                journaled=True,
+                synced=journaled_write.synced,
+                local_indexed=journaled_write.id in local_ids,
+                recovery_warnings=recovery_warnings,
+            )
+        )
     return tuple(writes)
 
 
@@ -257,6 +292,20 @@ def _memory_snapshot_id(target: str, content: str) -> str:
 def _looks_pinned_memory(content: str) -> bool:
     normalized = _normalize(content)
     return normalized.startswith(_PINNED_MEMORY_PREFIXES) or " pinned memory" in normalized
+
+
+def _journal_bool(value: object, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
 
 
 def _read_memory_entries(path: Path) -> tuple[str, ...]:
@@ -272,18 +321,19 @@ def _read_memory_entries(path: Path) -> tuple[str, ...]:
 def _read_memory_journal(
     journal_path: Path | str | None,
     memory_dir: Path,
-) -> tuple[set[str], set[tuple[str, str]], tuple[str, ...]]:
+) -> tuple[set[str], set[tuple[str, str]], tuple[str, ...], tuple[_JournaledMemoryWrite, ...]]:
     path = Path(journal_path) if journal_path is not None else memory_dir / "memory-wal.jsonl"
     if not path.exists():
-        return set(), set(), ()
+        return set(), set(), (), ()
 
     ids: set[str] = set()
     keys: set[tuple[str, str]] = set()
     warnings: list[str] = []
+    journaled_writes: list[_JournaledMemoryWrite] = []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
-        return set(), set(), ("memory_journal_unreadable",)
+        return set(), set(), ("memory_journal_unreadable",), ()
 
     for line in lines:
         stripped = line.strip()
@@ -305,8 +355,28 @@ def _read_memory_journal(
         content = record.get("content") or record.get("entry") or record.get("value")
         if isinstance(content, str) and content.strip():
             target = str(record.get("target") or "").strip()
-            keys.add((target, _normalize(content)))
-    return ids, keys, tuple(warnings)
+            normalized_content = _normalize(content)
+            keys.add((target, normalized_content))
+            snapshot_id = record_id or _memory_snapshot_id(target or "memory", content)
+            ids.add(snapshot_id)
+            pinned = _journal_bool(record.get("pinned")) or _looks_pinned_memory(content)
+            important = _journal_bool(record.get("important"), default=True) or pinned
+            synced_value = (
+                record["synced"]
+                if "synced" in record
+                else record.get("provider_synced")
+            )
+            journaled_writes.append(
+                _JournaledMemoryWrite(
+                    id=snapshot_id,
+                    target=target,
+                    content=content,
+                    important=important,
+                    pinned=pinned,
+                    synced=_journal_bool(synced_value),
+                )
+            )
+    return ids, keys, tuple(warnings), tuple(journaled_writes)
 
 
 def _read_memory_local_index_cache(
