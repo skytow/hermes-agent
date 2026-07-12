@@ -402,6 +402,7 @@ class MemoryBackupRecoveryReport:
             and not self.sync_without_journal_ids
             and not self.blocked_gc_delete_ids
             and not self.unresolved_conflicts
+            and not self.recovery_warnings_by_id
             and not self.obsidian_conflict_ids
         )
 

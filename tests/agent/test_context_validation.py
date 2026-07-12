@@ -750,3 +750,42 @@ def test_memory_backup_recovery_report_flags_obsidian_conflict_sources_without_c
     assert "private token amber" not in rendered
     assert "Friday pickup" not in rendered
     assert "Saturday pickup" not in rendered
+
+
+def test_memory_backup_recovery_report_warnings_make_report_not_ok_without_content(tmp_path):
+    vault = tmp_path / "vault"
+    note = vault / "memories" / "warning-only.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "# Warning\n\nPinned memory: Harbor account private token saffron has warning-only coverage.\n",
+        encoding="utf-8",
+    )
+
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="mem-harbor-warning",
+                content="Harbor account private token saffron has warning-only coverage.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=True,
+                local_indexed=True,
+                durable_note_terms=("Harbor", "warning-only coverage"),
+                recovery_warnings=("memory_journal_record_unrecognized",),
+            )
+        ],
+        note_index=LocalNoteIndex.from_path(vault),
+    )
+
+    assert not report.ok
+    assert report.diagnostics["recovery_status"] == "needs_attention"
+    assert report.recovery_warnings_by_id == {
+        "mem-harbor-warning": ("memory_journal_record_unrecognized",)
+    }
+
+    rendered = report.to_markdown()
+    assert "Recovery warnings" in rendered
+    assert "mem-harbor-warning: memory_journal_record_unrecognized" in rendered
+    assert "Harbor account" not in rendered
+    assert "saffron" not in rendered
