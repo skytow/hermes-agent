@@ -319,6 +319,7 @@ class MemoryBackupRecoveryReport:
     gc_audit_by_id: dict[str, str] = field(default_factory=dict)
     protected_from_gc_ids: tuple[str, ...] = ()
     unresolved_conflicts: tuple[ContextConflict, ...] = ()
+    conflict_write_ids_by_key: dict[str, tuple[str, ...]] = field(default_factory=dict)
     diagnostics: dict[str, object] = field(default_factory=dict)
 
     @property
@@ -404,6 +405,14 @@ class MemoryBackupRecoveryReport:
         if self.unresolved_conflicts:
             for conflict in self.unresolved_conflicts:
                 lines.append(f"- `{conflict.key}` requires clarification")
+        else:
+            lines.append("- none")
+        lines.append("")
+
+        lines.append("## Conflict write ids")
+        if self.conflict_write_ids_by_key:
+            for key, write_ids in sorted(self.conflict_write_ids_by_key.items()):
+                lines.append(f"- {key}: {', '.join(write_ids)}")
         else:
             lines.append("- none")
         lines.append("")
@@ -553,6 +562,7 @@ def build_memory_backup_recovery_report(
     gc_audit_by_id: dict[str, str] = {}
     protected: list[str] = []
     conflict_groups: dict[str, list[str]] = {}
+    conflict_id_groups: dict[str, list[str]] = {}
 
     for write in snapshots:
         if write.needs_durable_protection:
@@ -593,8 +603,13 @@ def build_memory_backup_recovery_report(
 
         if write.conflict_key:
             conflict_groups.setdefault(write.conflict_key, []).append(write.content)
+            conflict_id_groups.setdefault(write.conflict_key, []).append(write.id)
 
     conflicts = detect_context_conflicts(conflict_groups)
+    conflict_write_ids = {
+        conflict.key: tuple(conflict_id_groups.get(conflict.key, ()))
+        for conflict in conflicts
+    }
     diagnostics = {
         "last_successful_sync_at": last_successful_sync_at or "unknown",
         "last_garbage_collection_run_at": last_gc_run_at or "unknown",
@@ -620,6 +635,7 @@ def build_memory_backup_recovery_report(
             "unrecoverable_index": len(unrecoverable),
             "blocked_gc_delete": len(blocked_gc_deletes),
             "approved_gc_delete": len(approved_gc_deletes),
+            "conflict_keys": len(conflict_write_ids),
         },
     }
 
@@ -637,6 +653,7 @@ def build_memory_backup_recovery_report(
         gc_audit_by_id=gc_audit_by_id,
         protected_from_gc_ids=tuple(protected),
         unresolved_conflicts=conflicts,
+        conflict_write_ids_by_key=conflict_write_ids,
         diagnostics=diagnostics,
     )
 

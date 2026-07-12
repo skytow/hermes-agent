@@ -218,6 +218,45 @@ def test_memory_backup_recovery_report_preserves_conflicting_facts():
     assert report.diagnostics["conflict_count"] == 1
 
 
+def test_memory_backup_recovery_report_names_conflict_write_ids_without_values():
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="tz-east",
+                content="User timezone is America/New_York with private calendar anchors.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=True,
+                local_indexed=True,
+                conflict_key="timezone",
+            ),
+            MemoryRecoveryWrite(
+                id="tz-west",
+                content="User timezone is America/Los_Angeles with private calendar anchors.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=True,
+                local_indexed=True,
+                conflict_key="timezone",
+            ),
+        ],
+        note_index=LocalNoteIndex(()),
+    )
+
+    assert not report.ok
+    assert report.conflict_write_ids_by_key == {"timezone": ("tz-east", "tz-west")}
+    assert report.diagnostics["checks"]["conflict_keys"] == 1
+
+    rendered = report.to_markdown()
+    assert "Conflict write ids" in rendered
+    assert "timezone: tz-east, tz-west" in rendered
+    assert "America/New_York" not in rendered
+    assert "America/Los_Angeles" not in rendered
+    assert "private calendar anchors" not in rendered
+
+
 def test_memory_backup_recovery_report_blocks_protected_gc_without_rule_and_audit():
     report = build_memory_backup_recovery_report(
         [
