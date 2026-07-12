@@ -565,6 +565,41 @@ def test_memory_backup_recovery_report_records_privacy_check_without_values(tmp_
     assert "topaz" not in rendered
 
 
+def test_memory_backup_recovery_report_markdown_summarizes_privacy_check_without_values(tmp_path):
+    vault = tmp_path / "vault"
+    note = vault / "memories" / "privacy-markdown.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "# Privacy markdown\n\nPinned memory: Client Junco private pairing code citrine stays hidden.\n",
+        encoding="utf-8",
+    )
+
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="mem-junco-secret",
+                content="Client Junco private pairing code citrine stays hidden.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=True,
+                local_indexed=True,
+                durable_note_terms=("Client Junco", "pairing code", "citrine"),
+            )
+        ],
+        note_index=LocalNoteIndex.from_path(vault),
+        last_successful_sync_at="2026-07-12T22:15:00Z",
+    )
+
+    rendered = report.to_markdown()
+
+    assert "privacy_check.passed: True" in rendered
+    assert "privacy_check.raw_content_match_count: 0" in rendered
+    assert "privacy_check.checked_write_count: 1" in rendered
+    assert "Client Junco" not in rendered
+    assert "citrine" not in rendered
+
+
 def test_memory_backup_recovery_report_tracks_refinement_run_without_values(tmp_path):
     vault = tmp_path / "vault"
     note = vault / "memories" / "epsilon.md"

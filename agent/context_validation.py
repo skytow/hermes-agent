@@ -435,6 +435,14 @@ class MemoryBackupRecoveryReport:
             "protected_memory_count",
         ):
             lines.append(f"- {key}: {self.diagnostics.get(key, 'unknown')}")
+        privacy_check = self.diagnostics.get("privacy_check")
+        if isinstance(privacy_check, Mapping):
+            for key in (
+                "passed",
+                "raw_content_match_count",
+                "checked_write_count",
+            ):
+                lines.append(f"- privacy_check.{key}: {privacy_check.get(key, 'unknown')}")
         checks = self.diagnostics.get("checks")
         if isinstance(checks, Mapping):
             for key, value in sorted(checks.items()):
