@@ -627,3 +627,54 @@ def test_memory_startup_snapshot_adapter_recovers_from_corrupted_local_index_cac
     assert f"{write.id}: local_index_cache_unreadable" in rendered
     assert "Boreal renewal" not in rendered
     assert "bluebird" not in rendered
+
+
+def test_memory_backup_recovery_report_flags_obsidian_conflict_sources_without_content(tmp_path):
+    vault = tmp_path / "vault"
+    live_note = vault / "memories" / "atlas.md"
+    conflict_note = vault / "memories" / "atlas.sync-conflict.md"
+    live_note.parent.mkdir(parents=True)
+    live_note.write_text(
+        "# Atlas\n\nPinned memory: Atlas buyer private token amber uses Friday pickup.\n",
+        encoding="utf-8",
+    )
+    conflict_note.write_text(
+        "# Atlas conflict\n\nPinned memory: Atlas buyer private token amber uses Friday pickup.\n"
+        "Conflicting Obsidian copy also says Saturday pickup.\n",
+        encoding="utf-8",
+    )
+
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="mem-atlas-pickup",
+                content="Atlas buyer private token amber uses Friday pickup.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=True,
+                local_indexed=True,
+                durable_note_terms=("Atlas", "private token amber", "pickup"),
+            )
+        ],
+        note_index=LocalNoteIndex.from_path(vault),
+    )
+
+    assert not report.ok
+    assert report.obsidian_conflict_ids == ("mem-atlas-pickup",)
+    assert report.obsidian_conflict_sources_by_id == {
+        "mem-atlas-pickup": (
+            "memories/atlas.md",
+            "memories/atlas.sync-conflict.md",
+        )
+    }
+    checks = report.diagnostics["checks"]
+    assert isinstance(checks, dict)
+    assert checks["obsidian_conflicts"] == 1
+
+    rendered = report.to_markdown()
+    assert "Obsidian conflicts" in rendered
+    assert "mem-atlas-pickup: memories/atlas.md, memories/atlas.sync-conflict.md" in rendered
+    assert "private token amber" not in rendered
+    assert "Friday pickup" not in rendered
+    assert "Saturday pickup" not in rendered

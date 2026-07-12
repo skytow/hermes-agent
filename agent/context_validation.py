@@ -381,6 +381,8 @@ class MemoryBackupRecoveryReport:
     unresolved_conflicts: tuple[ContextConflict, ...] = ()
     conflict_write_ids_by_key: dict[str, tuple[str, ...]] = field(default_factory=dict)
     recovery_warnings_by_id: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    obsidian_conflict_ids: tuple[str, ...] = ()
+    obsidian_conflict_sources_by_id: dict[str, tuple[str, ...]] = field(default_factory=dict)
     diagnostics: dict[str, object] = field(default_factory=dict)
 
     @property
@@ -392,6 +394,7 @@ class MemoryBackupRecoveryReport:
             and not self.missing_local_index_ids
             and not self.blocked_gc_delete_ids
             and not self.unresolved_conflicts
+            and not self.obsidian_conflict_ids
         )
 
     def to_markdown(self) -> str:
@@ -455,6 +458,14 @@ class MemoryBackupRecoveryReport:
         if self.recovery_warnings_by_id:
             for write_id, warnings in sorted(self.recovery_warnings_by_id.items()):
                 lines.append(f"- {write_id}: {', '.join(warnings)}")
+        else:
+            lines.append("- none")
+        lines.append("")
+
+        lines.append("## Obsidian conflicts")
+        if self.obsidian_conflict_sources_by_id:
+            for write_id, sources in sorted(self.obsidian_conflict_sources_by_id.items()):
+                lines.append(f"- {write_id}: {', '.join(sources)}")
         else:
             lines.append("- none")
         lines.append("")
@@ -650,6 +661,8 @@ def build_memory_backup_recovery_report(
     conflict_groups: dict[str, list[str]] = {}
     conflict_id_groups: dict[str, list[str]] = {}
     recovery_warnings: dict[str, tuple[str, ...]] = {}
+    obsidian_conflict_ids: list[str] = []
+    obsidian_conflict_sources: dict[str, tuple[str, ...]] = {}
 
     for write in snapshots:
         if write.recovery_warnings:
@@ -668,6 +681,9 @@ def build_memory_backup_recovery_report(
 
             note_terms = write.durable_note_terms or (write.content,)
             note_hits = note_index.search(write.id, note_terms)
+            if len(note_hits) > 1:
+                obsidian_conflict_ids.append(write.id)
+                obsidian_conflict_sources[write.id] = tuple(hit.source for hit in note_hits)
             if not note_hits:
                 missing_notes.append(write.id)
 
@@ -720,6 +736,7 @@ def build_memory_backup_recovery_report(
         "protected_memory_count": len(protected),
         "gc_delete_audit_count": len(gc_audit_by_id),
         "recovery_warning_count": len(recovery_warnings),
+        "obsidian_conflict_count": len(obsidian_conflict_ids),
         "recovery_status": "ok"
         if not (
             missing_journal
@@ -728,6 +745,7 @@ def build_memory_backup_recovery_report(
             or blocked_gc_deletes
             or conflicts
             or recovery_warnings
+            or obsidian_conflict_ids
         )
         else "needs_attention",
         "checks": {
@@ -741,6 +759,7 @@ def build_memory_backup_recovery_report(
             "approved_gc_delete": len(approved_gc_deletes),
             "conflict_keys": len(conflict_write_ids),
             "recovery_warnings": len(recovery_warnings),
+            "obsidian_conflicts": len(obsidian_conflict_ids),
         },
     }
 
@@ -761,6 +780,8 @@ def build_memory_backup_recovery_report(
         unresolved_conflicts=conflicts,
         conflict_write_ids_by_key=conflict_write_ids,
         recovery_warnings_by_id=recovery_warnings,
+        obsidian_conflict_ids=tuple(obsidian_conflict_ids),
+        obsidian_conflict_sources_by_id=obsidian_conflict_sources,
         diagnostics=diagnostics,
     )
 
