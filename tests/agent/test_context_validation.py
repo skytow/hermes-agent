@@ -504,3 +504,47 @@ def test_memory_startup_snapshot_adapter_reads_journal_and_notes_without_content
     assert write.id in rendered
     assert "Atlas launch" not in rendered
     assert "redwood" not in rendered
+
+
+def test_memory_startup_snapshot_adapter_recovers_from_corrupted_local_index_cache(tmp_path):
+    memory_dir = tmp_path / "memories"
+    memory_dir.mkdir()
+    memory_text = "Pinned memory: Boreal renewal token bluebird must survive restart."
+    (memory_dir / "MEMORY.md").write_text(memory_text, encoding="utf-8")
+    journal_path = memory_dir / "memory-wal.jsonl"
+    journal_path.write_text(
+        json.dumps({"target": "memory", "content": memory_text}) + "\n",
+        encoding="utf-8",
+    )
+    local_index_cache = memory_dir / "local-index-cache.json"
+    local_index_cache.write_text("{not-valid-json", encoding="utf-8")
+    vault = tmp_path / "vault"
+    note = vault / "memories" / "boreal.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(f"# Boreal\n\n{memory_text}\n", encoding="utf-8")
+
+    writes = build_memory_startup_recovery_writes(
+        memory_dir,
+        journal_path=journal_path,
+        local_index_cache_path=local_index_cache,
+    )
+
+    assert len(writes) == 1
+    write = writes[0]
+    assert write.local_indexed is False
+    assert write.recovery_warnings == ("local_index_cache_unreadable",)
+
+    report = build_memory_backup_recovery_report(
+        writes,
+        note_index=LocalNoteIndex.from_path(vault),
+    )
+
+    assert report.recoverable_index_ids == (write.id,)
+    assert report.recovery_warnings_by_id == {
+        write.id: ("local_index_cache_unreadable",)
+    }
+    rendered = report.to_markdown()
+    assert "Recovery warnings" in rendered
+    assert f"{write.id}: local_index_cache_unreadable" in rendered
+    assert "Boreal renewal" not in rendered
+    assert "bluebird" not in rendered

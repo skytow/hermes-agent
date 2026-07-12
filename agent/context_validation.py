@@ -179,6 +179,7 @@ class MemoryRecoveryWrite:
     local_indexed: bool = False
     durable_note_terms: tuple[str, ...] = ()
     conflict_key: str = ""
+    recovery_warnings: tuple[str, ...] = ()
 
     @property
     def needs_durable_protection(self) -> bool:
@@ -198,6 +199,7 @@ def build_memory_startup_recovery_writes(
     *,
     journal_path: Path | str | None = None,
     local_index_ids: Sequence[str] = (),
+    local_index_cache_path: Path | str | None = None,
 ) -> tuple[MemoryRecoveryWrite, ...]:
     """Load built-in memory files as redaction-safe startup recovery snapshots.
 
@@ -213,6 +215,10 @@ def build_memory_startup_recovery_writes(
     """
     base = Path(memory_dir)
     local_ids = set(local_index_ids)
+    local_cache_ids, local_cache_warnings = _read_memory_local_index_cache(
+        local_index_cache_path
+    )
+    local_ids.update(local_cache_ids)
     journal_ids, journal_keys = _read_memory_journal(journal_path, base)
 
     writes: list[MemoryRecoveryWrite] = []
@@ -233,6 +239,7 @@ def build_memory_startup_recovery_writes(
                     ),
                     synced=True,
                     local_indexed=write_id in local_ids,
+                    recovery_warnings=local_cache_warnings,
                 )
             )
     return tuple(writes)
@@ -293,6 +300,55 @@ def _read_memory_journal(
     return ids, keys
 
 
+def _read_memory_local_index_cache(
+    cache_path: Path | str | None,
+) -> tuple[set[str], tuple[str, ...]]:
+    if cache_path is None:
+        return set(), ()
+
+    path = Path(cache_path)
+    if not path.exists():
+        return set(), ()
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return set(), ("local_index_cache_unreadable",)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return set(), ("local_index_cache_unreadable",)
+
+    candidates: object
+    if isinstance(data, Mapping):
+        candidates = (
+            data.get("ids")
+            or data.get("write_ids")
+            or data.get("local_index_ids")
+            or data.get("entries")
+        )
+        if candidates is None and ("id" in data or "write_id" in data):
+            candidates = [data]
+    else:
+        candidates = data
+
+    if isinstance(candidates, Mapping):
+        candidates = [candidates]
+    if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)):
+        return set(), ("local_index_cache_unrecognized",)
+
+    ids: set[str] = set()
+    for item in candidates:
+        if isinstance(item, Mapping):
+            value = item.get("write_id") or item.get("id")
+        else:
+            value = item
+        if isinstance(value, str) and value.strip():
+            ids.add(value.strip())
+    return ids, ()
+
+
 @dataclass(frozen=True)
 class MemoryStartupRecoveryTask:
     """Redacted startup rebuild instruction for a missing local memory index."""
@@ -320,6 +376,7 @@ class MemoryBackupRecoveryReport:
     protected_from_gc_ids: tuple[str, ...] = ()
     unresolved_conflicts: tuple[ContextConflict, ...] = ()
     conflict_write_ids_by_key: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    recovery_warnings_by_id: dict[str, tuple[str, ...]] = field(default_factory=dict)
     diagnostics: dict[str, object] = field(default_factory=dict)
 
     @property
@@ -371,6 +428,14 @@ class MemoryBackupRecoveryReport:
         if self.recovery_sources_by_id:
             for write_id, sources in sorted(self.recovery_sources_by_id.items()):
                 lines.append(f"- {write_id}: {', '.join(sources)}")
+        else:
+            lines.append("- none")
+        lines.append("")
+
+        lines.append("## Recovery warnings")
+        if self.recovery_warnings_by_id:
+            for write_id, warnings in sorted(self.recovery_warnings_by_id.items()):
+                lines.append(f"- {write_id}: {', '.join(warnings)}")
         else:
             lines.append("- none")
         lines.append("")
@@ -563,8 +628,11 @@ def build_memory_backup_recovery_report(
     protected: list[str] = []
     conflict_groups: dict[str, list[str]] = {}
     conflict_id_groups: dict[str, list[str]] = {}
+    recovery_warnings: dict[str, tuple[str, ...]] = {}
 
     for write in snapshots:
+        if write.recovery_warnings:
+            recovery_warnings[write.id] = write.recovery_warnings
         if write.needs_durable_protection:
             protected.append(write.id)
             if write.id in proposed_gc_deletes:
@@ -618,6 +686,7 @@ def build_memory_backup_recovery_report(
         "conflict_count": len(conflicts),
         "protected_memory_count": len(protected),
         "gc_delete_audit_count": len(gc_audit_by_id),
+        "recovery_warning_count": len(recovery_warnings),
         "recovery_status": "ok"
         if not (
             missing_journal
@@ -625,6 +694,7 @@ def build_memory_backup_recovery_report(
             or missing_index
             or blocked_gc_deletes
             or conflicts
+            or recovery_warnings
         )
         else "needs_attention",
         "checks": {
@@ -636,6 +706,7 @@ def build_memory_backup_recovery_report(
             "blocked_gc_delete": len(blocked_gc_deletes),
             "approved_gc_delete": len(approved_gc_deletes),
             "conflict_keys": len(conflict_write_ids),
+            "recovery_warnings": len(recovery_warnings),
         },
     }
 
@@ -654,6 +725,7 @@ def build_memory_backup_recovery_report(
         protected_from_gc_ids=tuple(protected),
         unresolved_conflicts=conflicts,
         conflict_write_ids_by_key=conflict_write_ids,
+        recovery_warnings_by_id=recovery_warnings,
         diagnostics=diagnostics,
     )
 
