@@ -524,6 +524,47 @@ def test_memory_backup_recovery_report_markdown_redacts_memory_content(tmp_path)
     assert "codeword orchid" not in rendered
 
 
+def test_memory_backup_recovery_report_records_privacy_check_without_values(tmp_path):
+    vault = tmp_path / "vault"
+    note = vault / "memories" / "privacy.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "# Privacy\n\nPinned memory: Client Ibis private launch phrase topaz stays hidden.\n",
+        encoding="utf-8",
+    )
+
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="mem-ibis-secret",
+                content="Client Ibis private launch phrase topaz stays hidden.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=True,
+                local_indexed=True,
+                durable_note_terms=("Client Ibis", "launch phrase", "topaz"),
+            )
+        ],
+        note_index=LocalNoteIndex.from_path(vault),
+        last_successful_sync_at="2026-07-12T18:10:00Z",
+        last_gc_run_at="2026-07-12T18:00:00Z",
+        last_refinement_run_at="2026-07-12T18:05:00Z",
+    )
+
+    privacy_check = report.diagnostics["privacy_check"]
+    assert privacy_check == {
+        "passed": True,
+        "raw_content_match_count": 0,
+        "checked_write_count": 1,
+    }
+    rendered = report.to_markdown()
+    assert "Client Ibis" not in str(report.diagnostics)
+    assert "topaz" not in str(report.diagnostics)
+    assert "Client Ibis" not in rendered
+    assert "topaz" not in rendered
+
+
 def test_memory_backup_recovery_report_tracks_refinement_run_without_values(tmp_path):
     vault = tmp_path / "vault"
     note = vault / "memories" / "epsilon.md"

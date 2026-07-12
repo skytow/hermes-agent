@@ -397,6 +397,11 @@ class MemoryBackupRecoveryReport:
     @property
     def ok(self) -> bool:
         """Whether durable backup/sync/recovery checks are fully green."""
+        privacy_check = self.diagnostics.get("privacy_check")
+        privacy_failed = (
+            isinstance(privacy_check, Mapping)
+            and privacy_check.get("passed") is False
+        )
         return (
             not self.missing_journal_ids
             and not self.missing_durable_note_ids
@@ -408,6 +413,7 @@ class MemoryBackupRecoveryReport:
             and not self.unresolved_conflicts
             and not self.recovery_warnings_by_id
             and not self.obsidian_conflict_ids
+            and not privacy_failed
         )
 
     def to_markdown(self) -> str:
@@ -800,6 +806,45 @@ def build_memory_backup_recovery_report(
             "obsidian_conflicts": len(obsidian_conflict_ids),
         },
     }
+    privacy_payload = json.dumps(
+        {
+            "missing_journal_ids": missing_journal,
+            "missing_durable_note_ids": missing_notes,
+            "missing_local_index_ids": missing_index,
+            "missing_sync_checkpoint_ids": missing_sync_checkpoint,
+            "retryable_write_ids": retryable,
+            "sync_without_journal_ids": sync_without_journal,
+            "sync_retry_plan_by_id": sync_retry_plans,
+            "recoverable_index_ids": recoverable,
+            "unrecoverable_index_ids": unrecoverable,
+            "recovery_sources_by_id": recovery_sources,
+            "startup_recovery_tasks": [
+                {
+                    "write_id": task.write_id,
+                    "sources": task.sources,
+                    "target_surface": task.target_surface,
+                }
+                for task in startup_tasks
+            ],
+            "blocked_gc_delete_ids": blocked_gc_deletes,
+            "approved_gc_delete_ids": approved_gc_deletes,
+            "gc_audit_by_id": gc_audit_by_id,
+            "gc_audit_log_id_by_write_id": gc_approval_audit_log_ids,
+            "protected_from_gc_ids": protected,
+            "conflict_keys": [conflict.key for conflict in conflicts],
+            "conflict_write_ids_by_key": conflict_write_ids,
+            "recovery_warnings_by_id": recovery_warnings,
+            "obsidian_conflict_ids": obsidian_conflict_ids,
+            "obsidian_conflict_sources_by_id": obsidian_conflict_sources,
+            "diagnostics": diagnostics,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    diagnostics["privacy_check"] = _memory_report_privacy_check(
+        snapshots,
+        privacy_payload,
+    )
 
     return MemoryBackupRecoveryReport(
         missing_journal_ids=tuple(missing_journal),
@@ -825,6 +870,28 @@ def build_memory_backup_recovery_report(
         obsidian_conflict_sources_by_id=obsidian_conflict_sources,
         diagnostics=diagnostics,
     )
+
+
+def _memory_report_privacy_check(
+    writes: Sequence[MemoryRecoveryWrite],
+    redacted_payload: str,
+) -> dict[str, object]:
+    """Return a compact proof that report diagnostics omit raw memory text."""
+    normalized_payload = _normalize(redacted_payload)
+    raw_content_match_count = 0
+    checked_write_count = 0
+    for write in writes:
+        content = _normalize(write.content)
+        if not content:
+            continue
+        checked_write_count += 1
+        if content in normalized_payload:
+            raw_content_match_count += 1
+    return {
+        "passed": raw_content_match_count == 0,
+        "raw_content_match_count": raw_content_match_count,
+        "checked_write_count": checked_write_count,
+    }
 
 
 def _hits_for_entries(
