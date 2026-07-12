@@ -416,6 +416,37 @@ def test_memory_backup_recovery_report_blocks_protected_gc_without_rule_and_audi
     assert "Client Delta" not in rendered
 
 
+def test_memory_backup_recovery_report_names_gc_audit_log_id_without_content():
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="mem-audit-delete",
+                content="Pinned memory: Client Sigma private retention token violet is superseded.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=True,
+                local_indexed=True,
+            )
+        ],
+        note_index=LocalNoteIndex(()),
+        proposed_gc_delete_ids=("mem-audit-delete",),
+        explicit_gc_rules={"mem-audit-delete": "user-confirmed-obsolete-memory"},
+        gc_audit_log_id_by_write_id={"mem-audit-delete": "audit-20260712-001"},
+    )
+
+    assert report.approved_gc_delete_ids == ("mem-audit-delete",)
+    assert report.gc_audit_log_id_by_write_id == {
+        "mem-audit-delete": "audit-20260712-001"
+    }
+    assert report.diagnostics["gc_delete_audit_count"] == 1
+
+    rendered = report.to_markdown()
+    assert "audit=audit-20260712-001" in rendered
+    assert "Client Sigma" not in rendered
+    assert "violet" not in rendered
+
+
 def test_memory_backup_recovery_report_markdown_redacts_memory_content(tmp_path):
     vault = tmp_path / "vault"
     note = vault / "memories" / "private.md"

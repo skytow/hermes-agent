@@ -384,6 +384,7 @@ class MemoryBackupRecoveryReport:
     blocked_gc_delete_ids: tuple[str, ...] = ()
     approved_gc_delete_ids: tuple[str, ...] = ()
     gc_audit_by_id: dict[str, str] = field(default_factory=dict)
+    gc_audit_log_id_by_write_id: dict[str, str] = field(default_factory=dict)
     protected_from_gc_ids: tuple[str, ...] = ()
     unresolved_conflicts: tuple[ContextConflict, ...] = ()
     conflict_write_ids_by_key: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -502,7 +503,9 @@ class MemoryBackupRecoveryReport:
         if self.approved_gc_delete_ids:
             for write_id in self.approved_gc_delete_ids:
                 rule = self.gc_audit_by_id.get(write_id, "unknown-rule")
-                lines.append(f"- {write_id} approved by {rule}")
+                audit_id = self.gc_audit_log_id_by_write_id.get(write_id)
+                audit_suffix = f" audit={audit_id}" if audit_id else ""
+                lines.append(f"- {write_id} approved by {rule}{audit_suffix}")
         else:
             lines.append("- approved protected deletes: none")
         lines.append("")
@@ -643,6 +646,7 @@ def build_memory_backup_recovery_report(
     proposed_gc_delete_ids: Sequence[str] = (),
     explicit_gc_rules: Mapping[str, str] | None = None,
     gc_audit_log_ids: Sequence[str] = (),
+    gc_audit_log_id_by_write_id: Mapping[str, str] | None = None,
 ) -> MemoryBackupRecoveryReport:
     """Validate durable-memory backup/sync/recovery invariants.
 
@@ -655,6 +659,11 @@ def build_memory_backup_recovery_report(
     proposed_gc_deletes = set(proposed_gc_delete_ids)
     gc_rules = explicit_gc_rules or {}
     audited_gc_deletes = set(gc_audit_log_ids)
+    gc_audit_log_ids_by_write = {
+        str(write_id): str(audit_id).strip()
+        for write_id, audit_id in (gc_audit_log_id_by_write_id or {}).items()
+        if str(write_id).strip() and str(audit_id).strip()
+    }
 
     missing_journal: list[str] = []
     missing_notes: list[str] = []
@@ -669,6 +678,7 @@ def build_memory_backup_recovery_report(
     blocked_gc_deletes: list[str] = []
     approved_gc_deletes: list[str] = []
     gc_audit_by_id: dict[str, str] = {}
+    gc_approval_audit_log_ids: dict[str, str] = {}
     protected: list[str] = []
     conflict_groups: dict[str, list[str]] = {}
     conflict_id_groups: dict[str, list[str]] = {}
@@ -685,9 +695,12 @@ def build_memory_backup_recovery_report(
             protected.append(write.id)
             if write.id in proposed_gc_deletes:
                 rule = str(gc_rules.get(write.id, "")).strip()
-                if rule and write.id in audited_gc_deletes:
+                audit_log_id = gc_audit_log_ids_by_write.get(write.id)
+                if rule and (write.id in audited_gc_deletes or audit_log_id):
                     approved_gc_deletes.append(write.id)
                     gc_audit_by_id[write.id] = rule
+                    if audit_log_id:
+                        gc_approval_audit_log_ids[write.id] = audit_log_id
                 else:
                     blocked_gc_deletes.append(write.id)
             if not write.journaled:
@@ -794,6 +807,7 @@ def build_memory_backup_recovery_report(
         blocked_gc_delete_ids=tuple(blocked_gc_deletes),
         approved_gc_delete_ids=tuple(approved_gc_deletes),
         gc_audit_by_id=gc_audit_by_id,
+        gc_audit_log_id_by_write_id=gc_approval_audit_log_ids,
         protected_from_gc_ids=tuple(protected),
         unresolved_conflicts=conflicts,
         conflict_write_ids_by_key=conflict_write_ids,
