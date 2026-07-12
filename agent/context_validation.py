@@ -399,6 +399,7 @@ class MemoryBackupRecoveryReport:
             not self.missing_journal_ids
             and not self.missing_durable_note_ids
             and not self.missing_local_index_ids
+            and not self.retryable_write_ids
             and not self.sync_without_journal_ids
             and not self.blocked_gc_delete_ids
             and not self.unresolved_conflicts
@@ -755,6 +756,7 @@ def build_memory_backup_recovery_report(
             missing_journal
             or missing_notes
             or missing_index
+            or retryable
             or sync_without_journal
             or blocked_gc_deletes
             or conflicts

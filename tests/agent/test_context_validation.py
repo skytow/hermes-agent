@@ -227,6 +227,41 @@ def test_memory_backup_recovery_report_names_sync_retry_plan_without_content(tmp
     assert "amethyst" not in rendered
 
 
+def test_memory_backup_recovery_report_marks_queued_sync_writes_not_ok(tmp_path):
+    vault = tmp_path / "vault"
+    note = vault / "memories" / "queued-provider-sync.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "# Queued sync\n\nPinned memory: Lumen buyer private token garnet is queued for provider sync.\n",
+        encoding="utf-8",
+    )
+
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="mem-lumen-queued-sync",
+                content="Lumen buyer private token garnet is queued for provider sync.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=False,
+                local_indexed=True,
+                durable_note_terms=("Lumen", "provider sync"),
+            )
+        ],
+        note_index=LocalNoteIndex.from_path(vault),
+    )
+
+    assert report.retryable_write_ids == ("mem-lumen-queued-sync",)
+    assert not report.ok
+    assert report.diagnostics["recovery_status"] == "needs_attention"
+    assert report.diagnostics["queued_write_count"] == 1
+    rendered = report.to_markdown()
+    assert "retryable writes: `mem-lumen-queued-sync`" in rendered
+    assert "Lumen buyer" not in rendered
+    assert "garnet" not in rendered
+
+
 def test_memory_backup_recovery_report_flags_synced_writes_without_journal(tmp_path):
     vault = tmp_path / "vault"
     note = vault / "memories" / "journal-first.md"
