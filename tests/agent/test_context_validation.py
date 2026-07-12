@@ -342,6 +342,42 @@ def test_memory_backup_recovery_report_markdown_redacts_memory_content(tmp_path)
     assert "codeword orchid" not in rendered
 
 
+def test_memory_backup_recovery_report_tracks_refinement_run_without_values(tmp_path):
+    vault = tmp_path / "vault"
+    note = vault / "memories" / "epsilon.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "# Epsilon\n\nPinned memory: Client Epsilon has private renewal keyword moonstone.\n",
+        encoding="utf-8",
+    )
+
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="mem-epsilon-secret",
+                content="Client Epsilon has private renewal keyword moonstone.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=True,
+                local_indexed=True,
+                durable_note_terms=("Client Epsilon", "moonstone"),
+            )
+        ],
+        note_index=LocalNoteIndex.from_path(vault),
+        last_successful_sync_at="2026-07-12T15:20:00Z",
+        last_gc_run_at="2026-07-12T15:10:00Z",
+        last_refinement_run_at="2026-07-12T15:15:00Z",
+    )
+
+    assert report.ok
+    assert report.diagnostics["last_refinement_run_at"] == "2026-07-12T15:15:00Z"
+    rendered = report.to_markdown()
+    assert "last_refinement_run_at: 2026-07-12T15:15:00Z" in rendered
+    assert "Client Epsilon" not in rendered
+    assert "moonstone" not in rendered
+
+
 def test_memory_backup_recovery_report_flags_unrecoverable_index_gaps():
     report = build_memory_backup_recovery_report(
         [

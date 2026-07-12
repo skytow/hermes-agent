@@ -403,6 +403,7 @@ class MemoryBackupRecoveryReport:
             "recovery_status",
             "last_successful_sync_at",
             "last_garbage_collection_run_at",
+            "last_refinement_run_at",
             "queued_write_count",
             "conflict_count",
             "protected_memory_count",
@@ -598,6 +599,7 @@ def build_memory_backup_recovery_report(
     note_index: LocalNoteIndex | None = None,
     last_successful_sync_at: str = "",
     last_gc_run_at: str = "",
+    last_refinement_run_at: str = "",
     proposed_gc_delete_ids: Sequence[str] = (),
     explicit_gc_rules: Mapping[str, str] | None = None,
     gc_audit_log_ids: Sequence[str] = (),
@@ -681,6 +683,7 @@ def build_memory_backup_recovery_report(
     diagnostics = {
         "last_successful_sync_at": last_successful_sync_at or "unknown",
         "last_garbage_collection_run_at": last_gc_run_at or "unknown",
+        "last_refinement_run_at": last_refinement_run_at or "unknown",
         "queued_write_count": len(retryable),
         "startup_recovery_task_count": len(startup_tasks),
         "conflict_count": len(conflicts),
