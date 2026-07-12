@@ -214,3 +214,42 @@ def test_memory_backup_recovery_report_preserves_conflicting_facts():
     assert report.unresolved_conflicts[0].key == "timezone"
     assert report.protected_from_gc_ids == ("tz-east", "tz-west")
     assert report.diagnostics["conflict_count"] == 1
+
+
+def test_memory_backup_recovery_report_markdown_redacts_memory_content(tmp_path):
+    vault = tmp_path / "vault"
+    note = vault / "memories" / "private.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "# Private\n\nPinned memory: Client Alpha has a private launch codeword orchid.\n",
+        encoding="utf-8",
+    )
+
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="mem-alpha-secret",
+                content="Client Alpha has a private launch codeword orchid.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=False,
+                local_indexed=False,
+                durable_note_terms=("Client Alpha", "codeword orchid"),
+            )
+        ],
+        note_index=LocalNoteIndex.from_path(vault),
+        last_successful_sync_at="2026-07-12T09:30:00Z",
+        last_gc_run_at="2026-07-12T09:00:00Z",
+    )
+
+    rendered = report.to_markdown()
+
+    assert "# Memory backup recovery report" in rendered
+    assert "recovery_status: needs_attention" in rendered
+    assert "queued_write_count: 1" in rendered
+    assert "mem-alpha-secret" in rendered
+    assert "missing local index" in rendered
+    assert "recoverable local index" in rendered
+    assert "Client Alpha" not in rendered
+    assert "codeword orchid" not in rendered

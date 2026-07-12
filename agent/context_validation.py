@@ -144,6 +144,13 @@ def _render_hit_section(
     return lines
 
 
+def _extend_id_lines(lines: list[str], label: str, ids: Sequence[str]) -> None:
+    if ids:
+        lines.append(f"- {label}: {', '.join(f'`{item}`' for item in ids)}")
+    else:
+        lines.append(f"- {label}: none")
+
+
 @dataclass(frozen=True)
 class NoteIndexEntry:
     """One markdown note in a local durable-note index."""
@@ -199,6 +206,48 @@ class MemoryBackupRecoveryReport:
             and not self.missing_local_index_ids
             and not self.unresolved_conflicts
         )
+
+    def to_markdown(self) -> str:
+        """Render redacted recovery diagnostics for operator handoffs.
+
+        The report intentionally emits stable write ids, counters, timestamps,
+        and conflict keys only.  It must not echo memory contents, note text, or
+        conflicting fact values.
+        """
+        lines = ["# Memory backup recovery report", ""]
+        lines.append("## Diagnostics")
+        for key in (
+            "recovery_status",
+            "last_successful_sync_at",
+            "last_garbage_collection_run_at",
+            "queued_write_count",
+            "conflict_count",
+            "protected_memory_count",
+        ):
+            lines.append(f"- {key}: {self.diagnostics.get(key, 'unknown')}")
+        checks = self.diagnostics.get("checks")
+        if isinstance(checks, Mapping):
+            for key, value in sorted(checks.items()):
+                lines.append(f"- check.{key}: {value}")
+        lines.append("")
+
+        lines.append("## Write ids")
+        _extend_id_lines(lines, "missing journal", self.missing_journal_ids)
+        _extend_id_lines(lines, "missing durable note", self.missing_durable_note_ids)
+        _extend_id_lines(lines, "missing local index", self.missing_local_index_ids)
+        _extend_id_lines(lines, "retryable writes", self.retryable_write_ids)
+        _extend_id_lines(lines, "recoverable local index", self.recoverable_index_ids)
+        _extend_id_lines(lines, "protected from GC", self.protected_from_gc_ids)
+        lines.append("")
+
+        lines.append("## Conflict keys")
+        if self.unresolved_conflicts:
+            for conflict in self.unresolved_conflicts:
+                lines.append(f"- `{conflict.key}` requires clarification")
+        else:
+            lines.append("- none")
+        lines.append("")
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True)
