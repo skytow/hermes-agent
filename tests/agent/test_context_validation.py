@@ -218,6 +218,52 @@ def test_memory_backup_recovery_report_preserves_conflicting_facts():
     assert report.diagnostics["conflict_count"] == 1
 
 
+def test_memory_backup_recovery_report_blocks_protected_gc_without_rule_and_audit():
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="mem-pinned-client",
+                content="Pinned memory: Client Gamma retention clause is private.",
+                important=True,
+                pinned=True,
+                journaled=True,
+                synced=True,
+                local_indexed=True,
+            ),
+            MemoryRecoveryWrite(
+                id="mem-superseded-client",
+                content="Important memory: Client Delta used an outdated escalation path.",
+                important=True,
+                journaled=True,
+                synced=True,
+                local_indexed=True,
+            ),
+        ],
+        note_index=LocalNoteIndex(()),
+        proposed_gc_delete_ids=("mem-pinned-client", "mem-superseded-client"),
+        explicit_gc_rules={"mem-superseded-client": "user-confirmed-superseded-fact"},
+        gc_audit_log_ids=("mem-superseded-client",),
+    )
+
+    assert not report.ok
+    assert report.blocked_gc_delete_ids == ("mem-pinned-client",)
+    assert report.approved_gc_delete_ids == ("mem-superseded-client",)
+    assert report.gc_audit_by_id == {
+        "mem-superseded-client": "user-confirmed-superseded-fact"
+    }
+    checks = report.diagnostics["checks"]
+    assert isinstance(checks, dict)
+    assert checks["blocked_gc_delete"] == 1
+    assert checks["approved_gc_delete"] == 1
+
+    rendered = report.to_markdown()
+    assert "GC delete safety" in rendered
+    assert "mem-pinned-client" in rendered
+    assert "mem-superseded-client approved by user-confirmed-superseded-fact" in rendered
+    assert "Client Gamma" not in rendered
+    assert "Client Delta" not in rendered
+
+
 def test_memory_backup_recovery_report_markdown_redacts_memory_content(tmp_path):
     vault = tmp_path / "vault"
     note = vault / "memories" / "private.md"

@@ -314,6 +314,9 @@ class MemoryBackupRecoveryReport:
     unrecoverable_index_ids: tuple[str, ...] = ()
     recovery_sources_by_id: dict[str, tuple[str, ...]] = field(default_factory=dict)
     startup_recovery_tasks: tuple[MemoryStartupRecoveryTask, ...] = ()
+    blocked_gc_delete_ids: tuple[str, ...] = ()
+    approved_gc_delete_ids: tuple[str, ...] = ()
+    gc_audit_by_id: dict[str, str] = field(default_factory=dict)
     protected_from_gc_ids: tuple[str, ...] = ()
     unresolved_conflicts: tuple[ContextConflict, ...] = ()
     diagnostics: dict[str, object] = field(default_factory=dict)
@@ -325,6 +328,7 @@ class MemoryBackupRecoveryReport:
             not self.missing_journal_ids
             and not self.missing_durable_note_ids
             and not self.missing_local_index_ids
+            and not self.blocked_gc_delete_ids
             and not self.unresolved_conflicts
         )
 
@@ -378,6 +382,22 @@ class MemoryBackupRecoveryReport:
                 )
         else:
             lines.append("- none")
+        lines.append("")
+
+        lines.append("## GC delete safety")
+        if self.blocked_gc_delete_ids:
+            lines.append(
+                "- blocked protected deletes: "
+                + ", ".join(f"`{item}`" for item in self.blocked_gc_delete_ids)
+            )
+        else:
+            lines.append("- blocked protected deletes: none")
+        if self.approved_gc_delete_ids:
+            for write_id in self.approved_gc_delete_ids:
+                rule = self.gc_audit_by_id.get(write_id, "unknown-rule")
+                lines.append(f"- {write_id} approved by {rule}")
+        else:
+            lines.append("- approved protected deletes: none")
         lines.append("")
 
         lines.append("## Conflict keys")
@@ -504,6 +524,9 @@ def build_memory_backup_recovery_report(
     note_index: LocalNoteIndex | None = None,
     last_successful_sync_at: str = "",
     last_gc_run_at: str = "",
+    proposed_gc_delete_ids: Sequence[str] = (),
+    explicit_gc_rules: Mapping[str, str] | None = None,
+    gc_audit_log_ids: Sequence[str] = (),
 ) -> MemoryBackupRecoveryReport:
     """Validate durable-memory backup/sync/recovery invariants.
 
@@ -513,6 +536,9 @@ def build_memory_backup_recovery_report(
     """
     snapshots = tuple(writes)
     note_index = note_index or LocalNoteIndex(())
+    proposed_gc_deletes = set(proposed_gc_delete_ids)
+    gc_rules = explicit_gc_rules or {}
+    audited_gc_deletes = set(gc_audit_log_ids)
 
     missing_journal: list[str] = []
     missing_notes: list[str] = []
@@ -522,12 +548,22 @@ def build_memory_backup_recovery_report(
     unrecoverable: list[str] = []
     recovery_sources: dict[str, tuple[str, ...]] = {}
     startup_tasks: list[MemoryStartupRecoveryTask] = []
+    blocked_gc_deletes: list[str] = []
+    approved_gc_deletes: list[str] = []
+    gc_audit_by_id: dict[str, str] = {}
     protected: list[str] = []
     conflict_groups: dict[str, list[str]] = {}
 
     for write in snapshots:
         if write.needs_durable_protection:
             protected.append(write.id)
+            if write.id in proposed_gc_deletes:
+                rule = str(gc_rules.get(write.id, "")).strip()
+                if rule and write.id in audited_gc_deletes:
+                    approved_gc_deletes.append(write.id)
+                    gc_audit_by_id[write.id] = rule
+                else:
+                    blocked_gc_deletes.append(write.id)
             if not write.journaled:
                 missing_journal.append(write.id)
 
@@ -566,8 +602,15 @@ def build_memory_backup_recovery_report(
         "startup_recovery_task_count": len(startup_tasks),
         "conflict_count": len(conflicts),
         "protected_memory_count": len(protected),
+        "gc_delete_audit_count": len(gc_audit_by_id),
         "recovery_status": "ok"
-        if not (missing_journal or missing_notes or missing_index or conflicts)
+        if not (
+            missing_journal
+            or missing_notes
+            or missing_index
+            or blocked_gc_deletes
+            or conflicts
+        )
         else "needs_attention",
         "checks": {
             "missing_journal": len(missing_journal),
@@ -575,6 +618,8 @@ def build_memory_backup_recovery_report(
             "missing_local_index": len(missing_index),
             "recoverable_index": len(recoverable),
             "unrecoverable_index": len(unrecoverable),
+            "blocked_gc_delete": len(blocked_gc_deletes),
+            "approved_gc_delete": len(approved_gc_deletes),
         },
     }
 
@@ -587,6 +632,9 @@ def build_memory_backup_recovery_report(
         unrecoverable_index_ids=tuple(unrecoverable),
         recovery_sources_by_id=recovery_sources,
         startup_recovery_tasks=tuple(startup_tasks),
+        blocked_gc_delete_ids=tuple(blocked_gc_deletes),
+        approved_gc_delete_ids=tuple(approved_gc_deletes),
+        gc_audit_by_id=gc_audit_by_id,
         protected_from_gc_ids=tuple(protected),
         unresolved_conflicts=conflicts,
         diagnostics=diagnostics,
