@@ -222,7 +222,8 @@ def build_memory_startup_recovery_writes(
         local_index_cache_path
     )
     local_ids.update(local_cache_ids)
-    journal_ids, journal_keys = _read_memory_journal(journal_path, base)
+    journal_ids, journal_keys, journal_warnings = _read_memory_journal(journal_path, base)
+    recovery_warnings = tuple(dict.fromkeys((*local_cache_warnings, *journal_warnings)))
 
     writes: list[MemoryRecoveryWrite] = []
     for target, filename in (("memory", "MEMORY.md"), ("user", "USER.md")):
@@ -242,7 +243,7 @@ def build_memory_startup_recovery_writes(
                     ),
                     synced=True,
                     local_indexed=write_id in local_ids,
-                    recovery_warnings=local_cache_warnings,
+                    recovery_warnings=recovery_warnings,
                 )
             )
     return tuple(writes)
@@ -271,17 +272,18 @@ def _read_memory_entries(path: Path) -> tuple[str, ...]:
 def _read_memory_journal(
     journal_path: Path | str | None,
     memory_dir: Path,
-) -> tuple[set[str], set[tuple[str, str]]]:
+) -> tuple[set[str], set[tuple[str, str]], tuple[str, ...]]:
     path = Path(journal_path) if journal_path is not None else memory_dir / "memory-wal.jsonl"
     if not path.exists():
-        return set(), set()
+        return set(), set(), ()
 
     ids: set[str] = set()
     keys: set[tuple[str, str]] = set()
+    warnings: list[str] = []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except UnicodeDecodeError:
-        lines = path.read_text(errors="replace").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return set(), set(), ("memory_journal_unreadable",)
 
     for line in lines:
         stripped = line.strip()
@@ -290,8 +292,12 @@ def _read_memory_journal(
         try:
             record = json.loads(stripped)
         except json.JSONDecodeError:
+            if "memory_journal_record_unreadable" not in warnings:
+                warnings.append("memory_journal_record_unreadable")
             continue
         if not isinstance(record, Mapping):
+            if "memory_journal_record_unrecognized" not in warnings:
+                warnings.append("memory_journal_record_unrecognized")
             continue
         record_id = str(record.get("write_id") or record.get("id") or "").strip()
         if record_id:
@@ -300,7 +306,7 @@ def _read_memory_journal(
         if isinstance(content, str) and content.strip():
             target = str(record.get("target") or "").strip()
             keys.add((target, _normalize(content)))
-    return ids, keys
+    return ids, keys, tuple(warnings)
 
 
 def _read_memory_local_index_cache(

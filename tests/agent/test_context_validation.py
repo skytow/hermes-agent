@@ -664,6 +664,43 @@ def test_memory_startup_snapshot_adapter_recovers_from_corrupted_local_index_cac
     assert "bluebird" not in rendered
 
 
+def test_memory_startup_snapshot_adapter_warns_on_corrupted_journal_without_content(tmp_path):
+    memory_dir = tmp_path / "memories"
+    memory_dir.mkdir()
+    memory_text = "Pinned memory: Cobalt renewal token lilac must survive offline sync."
+    (memory_dir / "MEMORY.md").write_text(memory_text, encoding="utf-8")
+    journal_path = memory_dir / "memory-wal.jsonl"
+    journal_path.write_text("{not-valid-json\n", encoding="utf-8")
+    vault = tmp_path / "vault"
+    note = vault / "memories" / "cobalt.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(f"# Cobalt\n\n{memory_text}\n", encoding="utf-8")
+
+    writes = build_memory_startup_recovery_writes(
+        memory_dir,
+        journal_path=journal_path,
+    )
+
+    assert len(writes) == 1
+    write = writes[0]
+    assert write.journaled is False
+    assert write.recovery_warnings == ("memory_journal_record_unreadable",)
+
+    report = build_memory_backup_recovery_report(
+        writes,
+        note_index=LocalNoteIndex.from_path(vault),
+    )
+
+    assert report.recoverable_index_ids == (write.id,)
+    assert report.recovery_warnings_by_id == {
+        write.id: ("memory_journal_record_unreadable",)
+    }
+    rendered = report.to_markdown()
+    assert f"{write.id}: memory_journal_record_unreadable" in rendered
+    assert "Cobalt renewal" not in rendered
+    assert "lilac" not in rendered
+
+
 def test_memory_backup_recovery_report_flags_obsidian_conflict_sources_without_content(tmp_path):
     vault = tmp_path / "vault"
     live_note = vault / "memories" / "atlas.md"
