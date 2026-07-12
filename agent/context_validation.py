@@ -193,6 +193,7 @@ class MemoryBackupRecoveryReport:
     missing_local_index_ids: tuple[str, ...] = ()
     retryable_write_ids: tuple[str, ...] = ()
     recoverable_index_ids: tuple[str, ...] = ()
+    unrecoverable_index_ids: tuple[str, ...] = ()
     protected_from_gc_ids: tuple[str, ...] = ()
     unresolved_conflicts: tuple[ContextConflict, ...] = ()
     diagnostics: dict[str, object] = field(default_factory=dict)
@@ -237,6 +238,7 @@ class MemoryBackupRecoveryReport:
         _extend_id_lines(lines, "missing local index", self.missing_local_index_ids)
         _extend_id_lines(lines, "retryable writes", self.retryable_write_ids)
         _extend_id_lines(lines, "recoverable local index", self.recoverable_index_ids)
+        _extend_id_lines(lines, "unrecoverable local index", self.unrecoverable_index_ids)
         _extend_id_lines(lines, "protected from GC", self.protected_from_gc_ids)
         lines.append("")
 
@@ -379,6 +381,7 @@ def build_memory_backup_recovery_report(
     missing_index: list[str] = []
     retryable: list[str] = []
     recoverable: list[str] = []
+    unrecoverable: list[str] = []
     protected: list[str] = []
     conflict_groups: dict[str, list[str]] = {}
 
@@ -397,6 +400,8 @@ def build_memory_backup_recovery_report(
                 missing_index.append(write.id)
                 if write.journaled or note_hits:
                     recoverable.append(write.id)
+                else:
+                    unrecoverable.append(write.id)
 
         if write.journaled and not write.synced:
             retryable.append(write.id)
@@ -419,6 +424,7 @@ def build_memory_backup_recovery_report(
             "missing_durable_note": len(missing_notes),
             "missing_local_index": len(missing_index),
             "recoverable_index": len(recoverable),
+            "unrecoverable_index": len(unrecoverable),
         },
     }
 
@@ -428,6 +434,7 @@ def build_memory_backup_recovery_report(
         missing_local_index_ids=tuple(missing_index),
         retryable_write_ids=tuple(retryable),
         recoverable_index_ids=tuple(recoverable),
+        unrecoverable_index_ids=tuple(unrecoverable),
         protected_from_gc_ids=tuple(protected),
         unresolved_conflicts=conflicts,
         diagnostics=diagnostics,

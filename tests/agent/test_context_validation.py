@@ -253,3 +253,34 @@ def test_memory_backup_recovery_report_markdown_redacts_memory_content(tmp_path)
     assert "recoverable local index" in rendered
     assert "Client Alpha" not in rendered
     assert "codeword orchid" not in rendered
+
+
+def test_memory_backup_recovery_report_flags_unrecoverable_index_gaps():
+    report = build_memory_backup_recovery_report(
+        [
+            MemoryRecoveryWrite(
+                id="mem-lost-cache",
+                content="A critical memory that is missing every recovery surface.",
+                important=True,
+                pinned=True,
+                journaled=False,
+                synced=False,
+                local_indexed=False,
+                durable_note_terms=("critical memory", "recovery surface"),
+            )
+        ],
+        note_index=LocalNoteIndex(()),
+    )
+
+    assert not report.ok
+    assert report.missing_journal_ids == ("mem-lost-cache",)
+    assert report.missing_durable_note_ids == ("mem-lost-cache",)
+    assert report.missing_local_index_ids == ("mem-lost-cache",)
+    assert report.recoverable_index_ids == ()
+    assert report.unrecoverable_index_ids == ("mem-lost-cache",)
+    checks = report.diagnostics["checks"]
+    assert isinstance(checks, dict)
+    assert checks["unrecoverable_index"] == 1
+    rendered = report.to_markdown()
+    assert "unrecoverable local index" in rendered
+    assert "critical memory" not in rendered
