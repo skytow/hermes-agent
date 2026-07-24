@@ -4106,7 +4106,23 @@ def tick(
                 _running_job_ids.add(job_id)
             # Record the attempt before executor dispatch. Recovery classifies
             # abandoned records as unknown; it never automatically retries them.
-            execution = create_execution(job_id, source="builtin")
+            # If the profile-local execution ledger itself cannot be opened
+            # (for example EMFILE while the gateway is fd-exhausted), there is
+            # no worker future yet whose finally block could release the
+            # in-memory guard. Release it here or every future tick for this job
+            # will become a stale "already running — skipping" no-op until the
+            # gateway process restarts (MAX-1354).
+            try:
+                execution = create_execution(job_id, source="builtin")
+            except Exception as claim_err:
+                with _running_lock:
+                    _running_job_ids.discard(job_id)
+                logger.error(
+                    "Job '%s' not dispatched — failed to create execution claim: %s",
+                    job.get("name", job_id),
+                    claim_err,
+                )
+                return None
             dispatched_job = dict(job, execution_id=execution["id"])
             _ctx = contextvars.copy_context()
 
